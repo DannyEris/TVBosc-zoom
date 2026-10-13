@@ -1,7 +1,10 @@
 package xyz.doikki.videoplayer.exo;
 
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.res.AssetFileDescriptor;
+import android.os.Build;
 import android.util.Log;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -94,7 +97,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             mTrackSelector = defaultTrackSelector;
         }
 
-        // 渲染器工厂：FFmpeg 软解优先（针对 DTS/TrueHD/EAC3 避开系统缺陷节点），关闭浮点输出并强制 16 位立体声下混
+        // 渲染器工厂：FFmpeg 优先软解，锁死 16-bit PCM，并挂载自适应声道处理器
         if (mRenderersFactory == null) {
             mRenderersFactory = new DefaultRenderersFactory(mAppContext) {
                 @Nullable
@@ -107,12 +110,12 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     return new DefaultAudioSink.Builder(context)
                             .setEnableFloatOutput(false) // 强制 16-bit 整型 PCM，消除 Android 5.1 浮点静音
                             .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
-                            .setAudioProcessors(new AudioProcessor[]{new StereoDownmixAudioProcessor()})
+                            .setAudioProcessors(new AudioProcessor[]{new AdaptiveDownmixAudioProcessor(context)})
                             .build();
                 }
             }
             .setEnableDecoderFallback(true)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER); // 优先调用 FFmpeg 软解特殊音轨
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER); // 优先调用全解码版 FFmpeg
         }
 
         mInternalPlayer = new SimpleExoPlayer.Builder(
@@ -344,6 +347,20 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     @Override
     public void onPlayerError(PlaybackException error) {
         Log.e("Tvbox-runtime", "echo-Exo player error: " + currentPlayPath, error);
+
+        // 防崩溃容灾：若因声道不支持或解码异常导致崩溃，自动重置并恢复默认音轨
+        if (error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED
+                || error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED
+                || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED) {
+            if (trackSelector != null && mInternalPlayer != null) {
+                Log.w("Tvbox-runtime", "echo-Exo Audio decode failed, resetting to default track");
+                trackSelector.setParameters(trackSelector.buildUponParameters().clearSelectionOverrides(C.TRACK_TYPE_AUDIO));
+                mInternalPlayer.prepare();
+                mInternalPlayer.setPlayWhenReady(true);
+                return;
+            }
+        }
+
         if (retryAsHls(error)) {
             return;
         }
@@ -394,11 +411,19 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     }
 
     /**
-     * 立体声降混音频处理器：
-     * 将解码出的多声道（5.1/7.1）PCM 强制混音为标准 2.0 立体声，避免 Android 5.1 AudioTrack 崩溃与无声；
-     * 原始 2.0 立体声或单声道直接直通。
+     * 自适应多声道降混音频处理器：
+     * 1. 动态探测当前 HDMI / 终端设备实际支持的最大物理声道数；
+     * 2. 若终端支持 5.1/7.1（如外接独立功放、家庭影院），直通输出原生多声道 PCM，保留真实环绕声定位；
+     * 3. 若终端仅支持 2 声道（如直连普通电视喇叭），自动执行 ITU-R BS.775 标准降混为立体声，杜绝崩溃；
+     * 4. 非 PCM 16-bit 格式或常规 <=2 声道音频完全直通。
      */
-    public static class StereoDownmixAudioProcessor extends BaseAudioProcessor {
+    public static class AdaptiveDownmixAudioProcessor extends BaseAudioProcessor {
+
+        private final Context mContext;
+
+        public AdaptiveDownmixAudioProcessor(Context context) {
+            this.mContext = context.getApplicationContext();
+        }
 
         @Override
         public AudioFormat onConfigure(AudioFormat inputAudioFormat) throws UnhandledAudioFormatException {
@@ -408,7 +433,31 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             if (inputAudioFormat.channelCount <= 2) {
                 return AudioFormat.NOT_SET;
             }
+
+            // 动态读取当前音频终端最大支持的物理声道数
+            int maxSupportedChannels = getMaxSupportedOutputChannels();
+            if (inputAudioFormat.channelCount <= maxSupportedChannels) {
+                // 外接 5.1/7.1 音响或回音壁时，直通多声道 PCM，保留原生环绕效果
+                return AudioFormat.NOT_SET;
+            }
+
+            // 设备仅支持 2 声道（如直连普通电视喇叭），降混为 2 声道立体声输出
             return new AudioFormat(inputAudioFormat.sampleRate, 2, C.ENCODING_PCM_16BIT);
+        }
+
+        private int getMaxSupportedOutputChannels() {
+            try {
+                Intent intent = mContext.registerReceiver(null, new IntentFilter("android.media.action.HDMI_AUDIO_PLUG"));
+                if (intent != null && intent.getIntExtra("android.media.extra.AUDIO_PLUG_STATE", 0) == 1) {
+                    int maxChannels = intent.getIntExtra("android.media.extra.MAX_CHANNEL_COUNT", 2);
+                    if (maxChannels > 0) {
+                        return maxChannels;
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            // Android 7.0 (API 24) 及以上系统原生自带底层混合管道；Android 5.1 及以下未探测到外设时默认按 2 声道安全输出
+            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.N ? 8 : 2;
         }
 
         @Override
@@ -432,7 +481,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 short backLeft = channelCount > 6 ? inputBuffer.getShort(position + 12) : 0;
                 short backRight = channelCount > 7 ? inputBuffer.getShort(position + 14) : 0;
 
-                // ITU-R BS.775 标准混音：中置与环绕声道按 0.707 (181/256) 混入，低频 LFE 按 0.5 (128/256) 保留
+                // ITU-R BS.775 混音模型：中置与环绕声道按 0.707 (181/256) 混入，低频 LFE 按 0.5 (128/256) 补偿保留
                 int cContrib = (center * 181) >> 8;
                 int lfeContrib = (lfe * 128) >> 8;
                 int outL = left + cContrib + lfeContrib + ((surroundLeft * 181) >> 8) + ((backLeft * 181) >> 8);
