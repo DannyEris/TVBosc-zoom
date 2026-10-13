@@ -138,7 +138,6 @@ android {
 //    }
     packagingOptions {
         pickFirst '**/libffmpegJNI.so'
-        pickFirst '**/libc++_shared.so'
     }
 }
 
