@@ -1,5 +1,6 @@
 package xyz.doikki.videoplayer.exo;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.net.Uri;
 import android.text.TextUtils;
@@ -20,10 +21,23 @@ import com.google.android.exoplayer2.upstream.cache.LeastRecentlyUsedCacheEvicto
 import com.google.android.exoplayer2.upstream.cache.SimpleCache;
 
 import java.io.File;
+import java.security.SecureRandom;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 
 import okhttp3.OkHttpClient;
+import okhttp3.Protocol;
 
 public final class ExoMediaSourceHelper {
     public static final String HEADER_FORMAT = "TVBox-Format";
@@ -194,23 +208,71 @@ public final class ExoMediaSourceHelper {
         }
         return externalCacheDir;
     }
+
     /**
      * Returns a new DataSource factory.
-     *
-     * @return A new DataSource factory.
      */
     private DataSource.Factory getDataSourceFactory() {
         return new com.google.android.exoplayer2.upstream.DefaultDataSourceFactory(mAppContext, getHttpDataSourceFactory());
     }
 
     /**
-     * Returns a new HttpDataSource factory.
-     *
-     * @return A new HttpDataSource factory.
+     * 为 ExoPlayer 构建高兼容的 OkHttp 客户端：
+     * 1. 忽略老系统无效的 SSL/TLS 证书拦截，彻底解决网盘 HTTPS 握手失败
+     * 2. 限制为 HTTP/1.1，杜绝网盘 CDN 在 HTTP/2 协议下 Range 断流的问题
+     * 3. 延长超时到 30 秒，开启连接失败自动重试与全协议重定向
      */
     private OkHttpDataSource.Factory getHttpDataSourceFactory() {
         if (mHttpDataSourceFactory == null) {
-            OkHttpClient client = mClient != null ? mClient : new OkHttpClient.Builder().build();
+            OkHttpClient client = mClient;
+            if (client == null) {
+                OkHttpClient.Builder builder = new OkHttpClient.Builder();
+                builder.connectTimeout(30, TimeUnit.SECONDS)
+                        .readTimeout(30, TimeUnit.SECONDS)
+                        .writeTimeout(30, TimeUnit.SECONDS)
+                        .retryOnConnectionFailure(true)
+                        .followRedirects(true)
+                        .followSslRedirects(true)
+                        .protocols(Collections.singletonList(Protocol.HTTP_1_1)); // 强制 HTTP/1.1 避免网盘 CDN HTTP/2 报错
+
+                try {
+                    final TrustManager[] trustAllCerts = new TrustManager[]{
+                            new X509TrustManager() {
+                                @SuppressLint("TrustAllX509TrustManager")
+                                @Override
+                                public void checkClientTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+                                }
+
+                                @SuppressLint("TrustAllX509TrustManager")
+                                @Override
+                                public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+                                }
+
+                                @Override
+                                public X509Certificate[] getAcceptedIssuers() {
+                                    return new X509Certificate[]{};
+                                }
+                            }
+                    };
+
+                    SSLContext sslContext = SSLContext.getInstance("TLS");
+                    sslContext.init(null, trustAllCerts, new SecureRandom());
+                    SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
+
+                    builder.sslSocketFactory(sslSocketFactory, (X509TrustManager) trustAllCerts[0]);
+                    builder.hostnameVerifier(new HostnameVerifier() {
+                        @SuppressLint("BadHostnameVerifier")
+                        @Override
+                        public boolean verify(String hostname, SSLSession session) {
+                            return true; // 信任任意域名证书
+                        }
+                    });
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+
+                client = builder.build();
+            }
             mHttpDataSourceFactory = new OkHttpDataSource.Factory(client);
         }
         return mHttpDataSourceFactory;
@@ -236,6 +298,7 @@ public final class ExoMediaSourceHelper {
                 }
             }
         }
+        getHttpDataSourceFactory(); // 确保工厂已初始化
         mHttpDataSourceFactory.setUserAgent(userAgent);
         mHttpDataSourceFactory.setDefaultRequestProperties(requestHeaders);
     }
