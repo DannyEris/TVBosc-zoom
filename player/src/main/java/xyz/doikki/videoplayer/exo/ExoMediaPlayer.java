@@ -1,10 +1,7 @@
 package xyz.doikki.videoplayer.exo;
 
 import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.res.AssetFileDescriptor;
-import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -209,14 +206,14 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     boolean enableAudioTrackPlaybackParams,
                     boolean enableOffload) {
 
-                // 允许最高 8 声道 PCM，杜绝压缩比特流伪透传
-                AudioCapabilities pcmCapabilities = new AudioCapabilities(new int[]{C.ENCODING_PCM_16BIT}, 8);
+                // 显式锁定支持双声道 16-bit PCM，杜绝压缩源码透传
+                AudioCapabilities pcmCapabilities = new AudioCapabilities(new int[]{C.ENCODING_PCM_16BIT}, 2);
 
                 return new DefaultAudioSink.Builder(context)
                         .setAudioCapabilities(pcmCapabilities)
                         .setEnableFloatOutput(false)
                         .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
-                        .setAudioProcessors(new AudioProcessor[]{new SmartSurroundAudioProcessor(context)})
+                        .setAudioProcessors(new AudioProcessor[]{new StandardStereoDownmixAudioProcessor(context)})
                         .build();
             }
         };
@@ -281,8 +278,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         currentPlayPath = path;
         currentHeaders = copyHeaders(headers);
         mRetriedAsHls = false;
-        // 每次切片源时复位容灾标志，优先尝试原生环绕声
-        SmartSurroundAudioProcessor.setForceStereoFallback(false);
         mMediaSource = mMediaSourceHelper.getMediaSource(path, copyHeaders(currentHeaders));
     }
 
@@ -456,24 +451,13 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
         writeDebugLog(mAppContext, "[播放报错] " + errDetail);
 
-        // 如果是音频管道/解码异常
         if (error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED) {
 
-            // 第一重容灾：若多声道原生输出导致声卡抛错，自动降级为立体声下混模式重试
-            if (!SmartSurroundAudioProcessor.isForceStereoFallback()) {
-                writeDebugLog(mAppContext, "[智能容灾触发] 多声道 AudioTrack 异常，自动降级为 2.0 立体声下混并重新准备！");
-                SmartSurroundAudioProcessor.setForceStereoFallback(true);
-                if (mInternalPlayer != null) {
-                    mInternalPlayer.prepare();
-                    mInternalPlayer.setPlayWhenReady(true);
-                    return;
-                }
-            }
+            showToast("音频解码异常 -> 正在回退音轨");
 
-            // 第二重容灾：已经是立体声仍失败，恢复默认主音轨
             if (trackSelector != null && mInternalPlayer != null) {
                 writeDebugLog(mAppContext, "[容灾生效] 重置音轨到默认");
                 trackSelector.setParameters(trackSelector.buildUponParameters().clearSelectionOverrides(C.TRACK_TYPE_AUDIO));
@@ -526,24 +510,14 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     }
 
     /**
-     * 智能多声道自适应与立体声降混处理器：
-     * 1. 当终端支持 5.1/7.1 时，直通原生多声道 PCM，保留物理独立环绕声效果；
-     * 2. 当终端仅支持 2.0 时，执行 ITU-R BS.775 标准立体声下混；
-     * 3. 若声卡抛出多声道异常，启动容灾降级下混。
+     * ITU-R BS.775 标准立体声下混处理器：
+     * 针对 Android 5.1 与电视环境，将所有多声道 PCM（5.1/7.1）强制混音为双声道立体声，
+     * 保留人声清晰度与低频动态，解决多声道 PCM 导致的电视端静音问题。
      */
-    public static class SmartSurroundAudioProcessor extends BaseAudioProcessor {
+    public static class StandardStereoDownmixAudioProcessor extends BaseAudioProcessor {
         private final Context mContext;
-        private static volatile boolean sForceStereoFallback = false;
 
-        public static void setForceStereoFallback(boolean force) {
-            sForceStereoFallback = force;
-        }
-
-        public static boolean isForceStereoFallback() {
-            return sForceStereoFallback;
-        }
-
-        public SmartSurroundAudioProcessor(Context context) {
+        public StandardStereoDownmixAudioProcessor(Context context) {
             this.mContext = context.getApplicationContext();
         }
 
@@ -556,44 +530,13 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 return AudioFormat.NOT_SET;
             }
             if (inputAudioFormat.channelCount <= 2) {
+                writeDebugLog(mContext, "[AudioProcessor] 2 声道直接直通输出");
                 return AudioFormat.NOT_SET;
             }
 
-            // 触发容灾模式：强制下混到 2.0
-            if (sForceStereoFallback) {
-                writeDebugLog(mContext, "[AudioProcessor] 容灾下混模式生效: " + inputAudioFormat.channelCount + " 声道 -> 2 声道");
-                return new AudioFormat(inputAudioFormat.sampleRate, 2, C.ENCODING_PCM_16BIT);
-            }
-
-            // 动态探测 HDMI 终端最大物理声道
-            int maxSupportedChannels = getMaxSupportedOutputChannels(mContext);
-            writeDebugLog(mContext, "[AudioProcessor] 终端最大支持物理声道: " + maxSupportedChannels);
-
-            // 若连接 5.1/7.1 独立音响且终端支持，放行原生多声道 PCM
-            if (inputAudioFormat.channelCount <= maxSupportedChannels) {
-                writeDebugLog(mContext, "[AudioProcessor] 识别到 5.1/7.1 功放终端，放行原生 "
-                        + inputAudioFormat.channelCount + " 声道 PCM 直通输出！");
-                return AudioFormat.NOT_SET;
-            }
-
-            // 直连普通 2 声道电视，执行标准立体声下混
-            writeDebugLog(mContext, "[AudioProcessor] 普通双声道终端，执行 ITU-R BS.775 下混: "
-                    + inputAudioFormat.channelCount + " 声道 -> 2 声道");
+            writeDebugLog(mContext, "[AudioProcessor] 激活 ITU-R BS.775 下混: "
+                    + inputAudioFormat.channelCount + " 声道 -> 2 声道立体声输出");
             return new AudioFormat(inputAudioFormat.sampleRate, 2, C.ENCODING_PCM_16BIT);
-        }
-
-        private static int getMaxSupportedOutputChannels(Context context) {
-            try {
-                Intent intent = context.registerReceiver(null, new IntentFilter("android.media.action.HDMI_AUDIO_PLUG"));
-                if (intent != null && intent.getIntExtra("android.media.extra.AUDIO_PLUG_STATE", 0) == 1) {
-                    int maxChannels = intent.getIntExtra("android.media.extra.MAX_CHANNEL_COUNT", 2);
-                    if (maxChannels > 0) {
-                        return maxChannels;
-                    }
-                }
-            } catch (Throwable ignored) {
-            }
-            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.N ? 8 : 2;
         }
 
         @Override
