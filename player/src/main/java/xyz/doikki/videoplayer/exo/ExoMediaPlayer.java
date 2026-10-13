@@ -1,6 +1,10 @@
 package xyz.doikki.videoplayer.exo;
 
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.content.res.AssetFileDescriptor;
 import android.os.Handler;
 import android.os.Looper;
@@ -62,6 +66,16 @@ import xyz.doikki.videoplayer.util.PlayerUtils;
 public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     private static final String TAG = "EXO-AUDIO";
+    private static final String SP_NAME = "tvbox_exo_audio_config";
+    private static final String KEY_MULTICHANNEL_MODE = "key_multichannel_mode";
+    public static final String ACTION_TOGGLE_AUDIO_MODE = "action.TVBOX_TOGGLE_AUDIO_MODE";
+
+    // =========================================================================
+    // 【静态默认开关】
+    // false = 电视模式 (强制 2.0 立体声下混，电视机/光纤发声，绝不哑音) [默认]
+    // true  = 功放模式 (原生 5.1/7.1 PCM 直通，需 HDMI 直连 5.1 独立功放)
+    // =========================================================================
+    public static final boolean DEFAULT_ENABLE_MULTICHANNEL_PCM = false;
 
     protected Context mAppContext;
     protected SimpleExoPlayer mInternalPlayer;
@@ -78,6 +92,18 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     protected String currentPlayPath;
     protected Map<String, String> currentHeaders;
     private boolean mRetriedAsHls;
+
+    private BroadcastReceiver mModeToggleReceiver;
+
+    public static boolean isMultiChannelModeEnabled(Context context) {
+        SharedPreferences sp = context.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+        return sp.getBoolean(KEY_MULTICHANNEL_MODE, DEFAULT_ENABLE_MULTICHANNEL_PCM);
+    }
+
+    public static void setMultiChannelModeEnabled(Context context, boolean enabled) {
+        SharedPreferences sp = context.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+        sp.edit().putBoolean(KEY_MULTICHANNEL_MODE, enabled).apply();
+    }
 
     private static void writeDebugLog(Context context, String msg) {
         Log.e(TAG, msg);
@@ -103,7 +129,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             @Override
             public void run() {
                 try {
-                    Toast.makeText(mAppContext, msg, Toast.LENGTH_LONG).show();
+                    Toast.makeText(mAppContext, msg, Toast.LENGTH_SHORT).show();
                 } catch (Throwable ignored) {
                 }
             }
@@ -113,11 +139,46 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     public ExoMediaPlayer(Context context) {
         mAppContext = context.getApplicationContext();
         mMediaSourceHelper = ExoMediaSourceHelper.getInstance(context);
+        registerModeReceiver();
+    }
+
+    private void registerModeReceiver() {
+        try {
+            mModeToggleReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    if (ACTION_TOGGLE_AUDIO_MODE.equals(intent.getAction())) {
+                        boolean current = isMultiChannelModeEnabled(context);
+                        boolean next = !current;
+                        setMultiChannelModeEnabled(context, next);
+                        String tip = next ? "已切换至: 功放模式 (原生 5.1/7.1 PCM 直通)" 
+                                          : "已切换至: 电视模式 (2.0 立体声下混)";
+                        showToast(tip);
+                        writeDebugLog(context, "[热切换广播触发] " + tip);
+
+                        // 重新构建播放器以应用新的声道策略
+                        if (mInternalPlayer != null && currentPlayPath != null) {
+                            long pos = getCurrentPosition();
+                            release();
+                            initPlayer();
+                            setDataSource(currentPlayPath, currentHeaders);
+                            seekTo(pos);
+                            prepareAsync();
+                        }
+                    }
+                }
+            };
+            mAppContext.registerReceiver(mModeToggleReceiver, new IntentFilter(ACTION_TOGGLE_AUDIO_MODE));
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override
     public void initPlayer() {
         checkFfmpegExtensionStatus();
+
+        boolean multiChannel = isMultiChannelModeEnabled(mAppContext);
+        writeDebugLog(mAppContext, "[initPlayer] 当前音频输出模式: " + (multiChannel ? "【功放模式 5.1 直通】" : "【电视模式 2.0 下混】"));
 
         if (mLoadControl == null) {
             mLoadControl = new DefaultLoadControl.Builder()
@@ -141,7 +202,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             mTrackSelector = defaultTrackSelector;
         }
 
-        mRenderersFactory = createCustomRenderersFactory();
+        mRenderersFactory = createCustomRenderersFactory(multiChannel);
 
         mInternalPlayer = new SimpleExoPlayer.Builder(
                 mAppContext,
@@ -163,7 +224,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         mInternalPlayer.addListener(this);
     }
 
-    private RenderersFactory createCustomRenderersFactory() {
+    private RenderersFactory createCustomRenderersFactory(final boolean enableMultiChannel) {
         return new DefaultRenderersFactory(mAppContext) {
             @Override
             protected void buildAudioRenderers(
@@ -176,9 +237,8 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     AudioRendererEventListener eventListener,
                     ArrayList<Renderer> out) {
 
-                writeDebugLog(context, "[buildAudioRenderers] 构建音频管线，锁定 FFmpeg 第一顺位...");
+                writeDebugLog(context, "[buildAudioRenderers] 锁定 FFmpeg 第一顺位软解...");
 
-                // 1. 将 FfmpegAudioRenderer 注册为第一顺位（接管 DTS/EAC3/TrueHD 等全部软解）
                 boolean ffmpegAdded = false;
                 try {
                     Class<?> clazz = Class.forName("com.google.android.exoplayer2.ext.ffmpeg.FfmpegAudioRenderer");
@@ -187,12 +247,11 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     Renderer ffmpegRenderer = (Renderer) constructor.newInstance(eventHandler, eventListener, audioSink);
                     out.add(ffmpegRenderer);
                     ffmpegAdded = true;
-                    writeDebugLog(context, "[buildAudioRenderers] 成功将 FfmpegAudioRenderer 注册为第 1 顺位！");
+                    writeDebugLog(context, "[buildAudioRenderers] 成功挂载 FfmpegAudioRenderer 到第 1 顺位！");
                 } catch (Throwable e) {
-                    writeDebugLog(context, "[buildAudioRenderers] 反射创建 FfmpegAudioRenderer 失败: " + e.getMessage());
+                    writeDebugLog(context, "[buildAudioRenderers] 挂载 FfmpegAudioRenderer 异常: " + e.getMessage());
                 }
 
-                // 2. 挂载 MediaCodecAudioRenderer 作为保底兜底
                 out.add(new MediaCodecAudioRenderer(
                         context, mediaCodecSelector, enableDecoderFallback, eventHandler, eventListener, audioSink));
                 writeDebugLog(context, "[buildAudioRenderers] 渲染器就绪, 数量=" + out.size() + ", FFmpeg优先=" + ffmpegAdded);
@@ -206,14 +265,15 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     boolean enableAudioTrackPlaybackParams,
                     boolean enableOffload) {
 
-                // 显式锁定支持双声道 16-bit PCM，杜绝压缩源码透传
-                AudioCapabilities pcmCapabilities = new AudioCapabilities(new int[]{C.ENCODING_PCM_16BIT}, 2);
+                // 功放模式允许 8 声道 PCM，电视模式锁定 2 声道 PCM
+                int maxChannels = enableMultiChannel ? 8 : 2;
+                AudioCapabilities pcmCapabilities = new AudioCapabilities(new int[]{C.ENCODING_PCM_16BIT}, maxChannels);
 
                 return new DefaultAudioSink.Builder(context)
                         .setAudioCapabilities(pcmCapabilities)
                         .setEnableFloatOutput(false)
                         .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
-                        .setAudioProcessors(new AudioProcessor[]{new StandardStereoDownmixAudioProcessor(context)})
+                        .setAudioProcessors(new AudioProcessor[]{new SwitchableDownmixAudioProcessor(context, enableMultiChannel)})
                         .build();
             }
         };
@@ -250,13 +310,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             writeDebugLog(mAppContext, info);
         } catch (Throwable e) {
             writeDebugLog(mAppContext, "[自检异常] 无法调用 FfmpegLibrary: " + e.getMessage());
-        }
-
-        try {
-            Class<?> rendererClass = Class.forName("com.google.android.exoplayer2.ext.ffmpeg.FfmpegAudioRenderer");
-            writeDebugLog(mAppContext, "[自检] FfmpegAudioRenderer 类已定位: " + rendererClass.getName());
-        } catch (Throwable t) {
-            writeDebugLog(mAppContext, "[自检警告] 找不到 FfmpegAudioRenderer 类: " + t.getMessage());
         }
     }
 
@@ -345,6 +398,13 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void release() {
+        if (mModeToggleReceiver != null) {
+            try {
+                mAppContext.unregisterReceiver(mModeToggleReceiver);
+                mModeToggleReceiver = null;
+            } catch (Throwable ignored) {
+            }
+        }
         if (mInternalPlayer != null) {
             mInternalPlayer.removeListener(this);
             mInternalPlayer.release();
@@ -456,7 +516,21 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED) {
 
-            showToast("音频解码异常 -> 正在回退音轨");
+            // 若在功放多声道模式下遇到 AudioTrack 崩溃，自动切回电视立体声模式容灾
+            if (isMultiChannelModeEnabled(mAppContext)) {
+                writeDebugLog(mAppContext, "[容灾生效] 功放模式声卡异常，自动切换回电视立体声模式！");
+                setMultiChannelModeEnabled(mAppContext, false);
+                showToast("声卡不支持多声道，已自动切换为电视立体声模式");
+                if (mInternalPlayer != null) {
+                    long pos = getCurrentPosition();
+                    release();
+                    initPlayer();
+                    setDataSource(currentPlayPath, currentHeaders);
+                    seekTo(pos);
+                    prepareAsync();
+                    return;
+                }
+            }
 
             if (trackSelector != null && mInternalPlayer != null) {
                 writeDebugLog(mAppContext, "[容灾生效] 重置音轨到默认");
@@ -510,15 +584,17 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     }
 
     /**
-     * ITU-R BS.775 标准立体声下混处理器：
-     * 针对 Android 5.1 与电视环境，将所有多声道 PCM（5.1/7.1）强制混音为双声道立体声，
-     * 保留人声清晰度与低频动态，解决多声道 PCM 导致的电视端静音问题。
+     * 可开关的立体声下混音频处理器：
+     * 1. 功放模式 (enableMultiChannel = true)：全部声道直接直通（输出 5.1/7.1 LPCM）；
+     * 2. 电视模式 (enableMultiChannel = false)：多声道强制下混为 2.0 立体声输出。
      */
-    public static class StandardStereoDownmixAudioProcessor extends BaseAudioProcessor {
+    public static class SwitchableDownmixAudioProcessor extends BaseAudioProcessor {
         private final Context mContext;
+        private final boolean mEnableMultiChannel;
 
-        public StandardStereoDownmixAudioProcessor(Context context) {
+        public SwitchableDownmixAudioProcessor(Context context, boolean enableMultiChannel) {
             this.mContext = context.getApplicationContext();
+            this.mEnableMultiChannel = enableMultiChannel;
         }
 
         @Override
@@ -530,12 +606,18 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 return AudioFormat.NOT_SET;
             }
             if (inputAudioFormat.channelCount <= 2) {
-                writeDebugLog(mContext, "[AudioProcessor] 2 声道直接直通输出");
                 return AudioFormat.NOT_SET;
             }
 
-            writeDebugLog(mContext, "[AudioProcessor] 激活 ITU-R BS.775 下混: "
-                    + inputAudioFormat.channelCount + " 声道 -> 2 声道立体声输出");
+            // 功放模式：放行原生 5.1/7.1 PCM 直通
+            if (mEnableMultiChannel) {
+                writeDebugLog(mContext, "[AudioProcessor] 【功放模式生效】放行原生 " + inputAudioFormat.channelCount + " 声道 PCM 直通！");
+                return AudioFormat.NOT_SET;
+            }
+
+            // 电视模式：执行 ITU-R BS.775 下混
+            writeDebugLog(mContext, "[AudioProcessor] 【电视模式生效】激活 ITU-R BS.775 下混: "
+                    + inputAudioFormat.channelCount + " 声道 -> 2 声道输出");
             return new AudioFormat(inputAudioFormat.sampleRate, 2, C.ENCODING_PCM_16BIT);
         }
 
@@ -560,7 +642,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 short backLeft = channelCount > 6 ? inputBuffer.getShort(position + 12) : 0;
                 short backRight = channelCount > 7 ? inputBuffer.getShort(position + 14) : 0;
 
-                // ITU-R BS.775 混音系数：中置与环绕 0.707 (181/256)，低频 0.5 (128/256)
                 int cContrib = (center * 181) >> 8;
                 int lfeContrib = (lfe * 128) >> 8;
                 int outL = left + cContrib + lfeContrib + ((surroundLeft * 181) >> 8) + ((backLeft * 181) >> 8);
