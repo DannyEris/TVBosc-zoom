@@ -110,7 +110,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     return new DefaultAudioSink.Builder(context)
                             .setEnableFloatOutput(enableFloatOutput)
                             .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
-                            .setEnableAudioOffload(enableOffload)
                             .setAudioProcessors(new AudioProcessor[]{new AdaptiveDownmixAudioProcessor(context)})
                             .build();
                 }
