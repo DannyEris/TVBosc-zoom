@@ -248,3 +248,6 @@
 #-dontwarn com.undcover.freedom.pyramid.**
 #-keep public class com.chaquo.python.** { *; }
 #-dontwarn com.chaquo.python.**
+
+-keep class com.google.android.exoplayer2.ext.ffmpeg.** { *; }
+-keep class * extends com.google.android.exoplayer2.audio.DecoderAudioRenderer { *; }
