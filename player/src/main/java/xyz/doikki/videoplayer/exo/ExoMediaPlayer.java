@@ -80,7 +80,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     .build();
         }
 
-        // 配置轨道选择器：放行 4K 10-bit 视频，并优先选择 AAC/MP3 音轨
+        // 配置轨道选择器：优先选用 AAC / MP3 音轨，同时放行 4K 10-bit 视频
         if (mTrackSelector == null) {
             DefaultTrackSelector defaultTrackSelector = new DefaultTrackSelector(mAppContext);
             defaultTrackSelector.setParameters(
@@ -94,7 +94,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             mTrackSelector = defaultTrackSelector;
         }
 
-        // 核心渲染器工厂：硬件解码优先，硬解不支持时降级至 FFmpeg 软解，并挂载多声道自动下混处理器
+        // 渲染器工厂：硬件优先，不支持时降级 FFmpeg 软解，并挂载多声道自动下混处理器
         if (mRenderersFactory == null) {
             mRenderersFactory = new DefaultRenderersFactory(mAppContext) {
                 @Nullable
@@ -102,7 +102,8 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 protected AudioSink buildAudioSink(
                         Context context,
                         boolean enableFloatOutput,
-                        boolean enableAudioTrackPlaybackParams) {
+                        boolean enableAudioTrackPlaybackParams,
+                        boolean enableOffload) {
                     return new DefaultAudioSink.Builder(context)
                             .setEnableFloatOutput(enableFloatOutput)
                             .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
@@ -394,8 +395,8 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     /**
      * 多声道下混立体声音频处理器：
-     * 仅当解码后的 PCM 声道数大于 2（如 5.1/7.1）时激活，按照 ITU-R 标准下混为 2 声道，避免老旧系统 AudioTrack 崩溃；
-     * 对常规 2.0 立体声或单声道音频，完全直通不处理。
+     * 仅当解码后的 PCM 声道数大于 2（如 5.1/7.1）时激活，按照 ITU-R 标准下混为 2 声道立体声，避免老旧系统 AudioTrack 崩溃；
+     * 对常规 2.0 立体声或单声道音频完全直通输出。
      */
     public static class StereoDownmixAudioProcessor extends BaseAudioProcessor {
 
@@ -404,11 +405,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT) {
                 throw new UnhandledAudioFormatException(inputAudioFormat);
             }
-            // 声道数 <= 2 时标记为 NOT_SET，处理器不介入工作（直通）
             if (inputAudioFormat.channelCount <= 2) {
                 return AudioFormat.NOT_SET;
             }
-            // 输出强制为 2 声道立体声，保持采样率不变
             return new AudioFormat(inputAudioFormat.sampleRate, 2, C.ENCODING_PCM_16BIT);
         }
 
@@ -417,9 +416,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             int position = inputBuffer.position();
             int limit = inputBuffer.limit();
             int channelCount = inputAudioFormat.channelCount;
-            int frameSize = channelCount * 2; // 16-bit PCM 每个声道占 2 字节
+            int frameSize = channelCount * 2;
             int frames = (limit - position) / frameSize;
-            int outputSize = frames * 4; // 双声道输出：2 声道 * 2 字节 = 4 字节/帧
+            int outputSize = frames * 4;
 
             ByteBuffer buffer = replaceOutputBuffer(outputSize);
 
@@ -427,10 +426,8 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 short left = inputBuffer.getShort(position);
                 short right = inputBuffer.getShort(position + 2);
                 short center = channelCount > 2 ? inputBuffer.getShort(position + 4) : 0;
-                // 5.1 声道排列：0:左, 1:右, 2:中置, 3:低音, 4:左环绕, 5:右环绕
                 short surroundLeft = channelCount > 4 ? inputBuffer.getShort(position + 8) : 0;
                 short surroundRight = channelCount > 5 ? inputBuffer.getShort(position + 10) : 0;
-                // 7.1 后环绕
                 short backLeft = channelCount > 6 ? inputBuffer.getShort(position + 12) : 0;
                 short backRight = channelCount > 7 ? inputBuffer.getShort(position + 14) : 0;
 
@@ -439,7 +436,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 int outL = left + cContrib + ((surroundLeft * 181) >> 8) + ((backLeft * 181) >> 8);
                 int outR = right + cContrib + ((surroundRight * 181) >> 8) + ((backRight * 181) >> 8);
 
-                // 防止整数溢出削峰
                 if (outL > 32767) outL = 32767;
                 else if (outL < -32768) outL = -32768;
 
