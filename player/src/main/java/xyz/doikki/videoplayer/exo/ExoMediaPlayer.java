@@ -187,13 +187,16 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         writeDebugLog(mAppContext, "[initPlayer] 当前音频输出模式: " + (multiChannel ? "【功放模式 5.1 直通】" : "【电视模式 2.0 下混】"));
 
         if (mLoadControl == null) {
-            mLoadControl = new DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(15_000, 30_000, 1_000, 3_000)
-                    .setTargetBufferBytes(32 * 1024 * 1024)
-                    .setPrioritizeTimeOverSizeThresholds(false)
-                    .setBackBuffer(0, false)
-                    .build();
-        }
+    mLoadControl = new DefaultLoadControl.Builder()
+            // 最小缓冲 20 秒，最大缓冲 60 秒，起播缓冲 2.5 秒，卡顿重起缓冲 5 秒
+            .setBufferDurationsMs(20_000, 60_000, 2_500, 5_000)
+            // 将上限放宽到 96MB (天猫魔盒 2G 内存完全扛得住)
+            .setTargetBufferBytes(96 * 1024 * 1024)
+            // 关键：时间优先！只要缓冲没达到 20 秒，哪怕超出了体积也继续全力下载，不让网盘断流
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .setBackBuffer(0, false)
+            .build();
+}
 
         if (mTrackSelector == null) {
             DefaultTrackSelector defaultTrackSelector = new DefaultTrackSelector(mAppContext);
