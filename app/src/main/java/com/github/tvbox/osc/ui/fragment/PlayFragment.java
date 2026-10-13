@@ -140,6 +140,7 @@ import tv.danmaku.ijk.media.player.IjkTimedText;
 import xyz.doikki.videoplayer.player.AbstractPlayer;
 import xyz.doikki.videoplayer.player.ProgressManager;
 import xyz.doikki.videoplayer.player.VideoView;
+import android.graphics.Typeface;
 import com.google.android.exoplayer2.ui.CaptionStyleCompat;
 
 public class PlayFragment extends BaseLazyFragment {
@@ -1046,21 +1047,20 @@ public class PlayFragment extends BaseLazyFragment {
         mController.mExoSubtitleView.setFractionalTextSize(0.0533f * scale);
         mController.mExoSubtitleView.setBottomPaddingFraction(limit(0.08f + position / 100f, 0f, 0.9f));
 
-        // 1. 禁用内置黑底样式，强制使用透明背景 + 纯白文字 + 黑色微阴影 (常用外挂字幕风格)
+        // 纯白文字 + 完全透明背景 + 纯黑轻微阴影 + 字体强力加粗
         mController.mExoSubtitleView.setApplyEmbeddedStyles(false);
         CaptionStyleCompat style = new CaptionStyleCompat(
                 Color.WHITE,                                // 文字颜色：纯白
-                Color.TRANSPARENT,                          // 背景色：完全透明 (去除黑框背景)
+                Color.TRANSPARENT,                          // 背景色：完全透明 (去黑底)
                 Color.TRANSPARENT,                          // 窗口底色：完全透明
-                CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW,  // 边缘样式：微微阴影
+                CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW,  // 边缘样式：微阴影
                 Color.BLACK,                                // 阴影颜色：纯黑
-                null);                                      // 字体：系统默认
+                Typeface.DEFAULT_BOLD);                     // 字体：加粗显示 (Bold)
         mController.mExoSubtitleView.setStyle(style);
 
         List<Cue> displayCues = new ArrayList<>();
         for (Cue cue : exoCues) {
             if (cue.bitmap == null) {
-                // 清除文本字幕自带的黑色背景块
                 Cue.Builder builder = cue.buildUpon();
                 builder.clearWindowColor();
                 displayCues.add(builder.build());
