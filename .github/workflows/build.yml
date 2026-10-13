@@ -3,6 +3,19 @@ name: Build TVBox APK
 on:
   workflow_dispatch:
     inputs:
+      flavor:
+        description: '版本与架构选择 (Version & Architecture)'
+        required: true
+        default: 'java32 (Java 32位 - armeabi-v7a)'
+        type: choice
+        options:
+          - 'java32 (Java 32位 - armeabi-v7a)'
+          - 'java64 (Java 64位 - arm64-v8a)'
+          - 'java (Java 双架构 - universal)'
+          - 'python32 (Python 32位 - armeabi-v7a)'
+          - 'python64 (Python 64位 - arm64-v8a)'
+          - 'python (Python 双架构 - universal)'
+          - 'all (全部版本 - 编译所有架构与模式)'
       build_type:
         description: '编译类型 (Build Type)'
         required: true
@@ -11,16 +24,6 @@ on:
         options:
           - 'release'
           - 'debug'
-      arch:
-        description: 'CPU 架构版本 (Architecture)'
-        required: true
-        default: 'all'
-        type: choice
-        options:
-          - 'all'
-          - 'universal'
-          - 'arm32'
-          - 'arm64'
 
 jobs:
   build:
@@ -55,30 +58,33 @@ jobs:
       - name: Determine Gradle Task
         id: gradle_task
         run: |
-          TYPE="${{ github.event.inputs.build_type }}"
-          ARCH="${{ github.event.inputs.arch }}"
+          # 1. 提取选项开头的标识符 (例如从 "java32 (Java 32位 - armeabi-v7a)" 提取 "java32")
+          RAW_FLAVOR="${{ github.event.inputs.flavor }}"
+          FLAVOR=$(echo "$RAW_FLAVOR" | awk '{print $1}')
           
+          # 2. 转换编译类型首字母大写 (release -> Release, debug -> Debug)
+          TYPE="${{ github.event.inputs.build_type }}"
           TYPE_CAP="$(tr '[:lower:]' '[:upper:]' <<< ${TYPE:0:1})${TYPE:1}"
           
-          if [ "$ARCH" = "universal" ]; then
-            TASK="assemblePython${TYPE_CAP}"
-          elif [ "$ARCH" = "arm32" ]; then
-            TASK="assemblePython32${TYPE_CAP}"
-          elif [ "$ARCH" = "arm64" ]; then
-            TASK="assemblePython64${TYPE_CAP}"
-          else
+          # 3. 映射对应的 Gradle Task
+          if [ "$FLAVOR" = "all" ]; then
             TASK="assemble${TYPE_CAP}"
+          else
+            FLAVOR_CAP="$(tr '[:lower:]' '[:upper:]' <<< ${FLAVOR:0:1})${FLAVOR:1}"
+            TASK="assemble${FLAVOR_CAP}${TYPE_CAP}"
           fi
           
+          echo "Selected Flavor: $FLAVOR"
           echo "Selected Gradle Task: $TASK"
           echo "task=$TASK" >> $GITHUB_OUTPUT
+          echo "flavor=$FLAVOR" >> $GITHUB_OUTPUT
 
       - name: Build APK with Gradle
         run: ./gradlew ${{ steps.gradle_task.outputs.task }} --stacktrace
 
       - name: Sign and Align APKs
         run: |
-          # 1. 动态生成独立发布签名文件
+          # 1. 动态生成独立签名证书
           keytool -genkey -v -keystore tvbox.jks -keyalg RSA -keysize 2048 -validity 10000 \
             -alias tvbox -keypass 123456 -storepass 123456 \
             -dname "CN=TVBox, OU=TVBox, O=TVBox, L=SH, ST=SH, C=CN"
@@ -87,7 +93,7 @@ jobs:
           BUILD_TOOLS_DIR=$(ls -d $ANDROID_SDK_ROOT/build-tools/* | sort -V | tail -n 1)
           echo "Using Build Tools from: $BUILD_TOOLS_DIR"
 
-          # 3. 对所有输出的 APK 进行对齐与签名
+          # 3. 对生成的 APK 进行对齐与签名
           find app/build/outputs/apk -name "*.apk" | while read -r apk; do
             echo "----------------------------------------"
             echo "Processing APK: $apk"
@@ -98,11 +104,11 @@ jobs:
             # 对齐优化
             "$BUILD_TOOLS_DIR/zipalign" -f -p 4 "$apk" "$aligned_apk" 2>/dev/null || cp "$apk" "$aligned_apk"
             
-            # 使用 apksigner 进行签名
+            # apksigner V1 + V2 + V3 签名
             "$BUILD_TOOLS_DIR/apksigner" sign --ks tvbox.jks --ks-pass pass:123456 --key-pass pass:123456 --ks-key-alias tvbox --out "$signed_apk" "$aligned_apk"
             rm -f "$aligned_apk"
             
-            # 覆盖原安装包
+            # 去除文件名中的 -unsigned 标识并替换原文件
             final_apk="${apk/-unsigned/}"
             mv -f "$signed_apk" "$final_apk"
             if [ "$final_apk" != "$apk" ]; then
@@ -117,6 +123,6 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TVBox-APKs-${{ github.event.inputs.arch }}-${{ github.event.inputs.build_type }}
+          name: TVBox-${{ steps.gradle_task.outputs.flavor }}-${{ github.event.inputs.build_type }}
           path: app/build/outputs/apk/**/*.apk
           if-no-files-found: error
