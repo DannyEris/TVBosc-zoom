@@ -17,6 +17,8 @@ import android.os.Message;
 import android.text.TextUtils;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.SurfaceView;
+import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.ConsoleMessage;
@@ -312,7 +314,7 @@ public class PlayFragment extends BaseLazyFragment {
                     markPlaybackStarted();
                     hideTipOnUiThread();
                     if (mController != null) {
-                        mController.applyCurrentZoom();
+                        applyVideoZoom(mController.getCurrentZoom());
                     }
                 }
                 if (switchingPlayback) {
@@ -451,9 +453,10 @@ public class PlayFragment extends BaseLazyFragment {
                 if (mVideoView != null) mVideoView.prepared();
                 startDanmuIfReady();
                 if (mController != null) {
-                    mController.applyCurrentZoom();
+                    applyVideoZoom(mController.getCurrentZoom());
                 }
             }
+
             @Override
             public void startPlayUrl(String url, HashMap<String, String> headers) {
                 if (!TextUtils.isEmpty(m3u8SourceUrl) && !isM3u8ProxyUrl(url)) clearM3u8ProxyUrl();
@@ -476,13 +479,7 @@ public class PlayFragment extends BaseLazyFragment {
 
             @Override
             public void onVideoZoomChange(float zoom) {
-                if (mVideoView != null) {
-                    View renderContainer = mVideoView.getChildAt(0);
-                    if (renderContainer != null) {
-                        renderContainer.setScaleX(zoom);
-                        renderContainer.setScaleY(zoom);
-                    }
-                }
+                applyVideoZoom(zoom);
             }
 
             @Override
@@ -526,6 +523,83 @@ public class PlayFragment extends BaseLazyFragment {
             }
         });
         mVideoView.setVideoController(mController);
+    }
+
+    /**
+     * 精确居中等比缩放底层视频画面，绝对不影响 UI 控制层
+     */
+    private void applyVideoZoom(final float zoom) {
+        if (mVideoView == null) return;
+        mVideoView.post(new Runnable() {
+            @Override
+            public void run() {
+                if (mVideoView == null) return;
+
+                // 1. 严格确保 VideoView 外层、中间容器以及控制层自身的缩放为 1.0f
+                if (mVideoView.getScaleX() != 1.0f || mVideoView.getScaleY() != 1.0f) {
+                    mVideoView.setScaleX(1.0f);
+                    mVideoView.setScaleY(1.0f);
+                }
+                if (mController != null && (mController.getScaleX() != 1.0f || mController.getScaleY() != 1.0f)) {
+                    mController.setScaleX(1.0f);
+                    mController.setScaleY(1.0f);
+                }
+
+                // 2. 穿透视图树，仅寻找真实的画面渲染控件（TextureView / SurfaceView）
+                boolean matched = applyScaleToRenderView(mVideoView, zoom);
+
+                // 3. 兜底保护：若尚未完成渲染绑定，则对 mPlayerContainer 中除了控制层之外的兄弟渲染视图缩放
+                if (!matched && mVideoView.getChildCount() > 0) {
+                    View playerContainer = mVideoView.getChildAt(0);
+                    if (playerContainer instanceof ViewGroup && playerContainer != mController) {
+                        ViewGroup vg = (ViewGroup) playerContainer;
+                        // 确保 playerContainer 自身不缩放
+                        vg.setScaleX(1.0f);
+                        vg.setScaleY(1.0f);
+                        for (int i = 0; i < vg.getChildCount(); i++) {
+                            View child = vg.getChildAt(i);
+                            if (child != mController && !(child instanceof VodController)) {
+                                setViewPivotAndScale(child, zoom);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    private boolean applyScaleToRenderView(View root, float zoom) {
+        if (root == null || root == mController || root instanceof VodController) {
+            return false;
+        }
+        if (root instanceof TextureView || root instanceof SurfaceView) {
+            setViewPivotAndScale(root, zoom);
+            return true;
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) root;
+            boolean found = false;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                View child = group.getChildAt(i);
+                if (child != mController && !(child instanceof VodController)) {
+                    if (applyScaleToRenderView(child, zoom)) {
+                        found = true;
+                    }
+                }
+            }
+            return found;
+        }
+        return false;
+    }
+
+    private void setViewPivotAndScale(View view, float zoom) {
+        if (view == null) return;
+        if (view.getWidth() > 0 && view.getHeight() > 0) {
+            view.setPivotX(view.getWidth() / 2.0f);
+            view.setPivotY(view.getHeight() / 2.0f);
+        }
+        view.setScaleX(zoom);
+        view.setScaleY(zoom);
     }
 
     private void showCastDialog() {
@@ -1033,6 +1107,7 @@ public class PlayFragment extends BaseLazyFragment {
         LOG.i("echo-playM3u8:" + url);
         mController.playM3u8(url,headers);
     }
+
     public void goPlayUrl(String url, HashMap<String, String> headers) {
         LOG.i("echo-goPlayUrl:" + url);
         if (TextUtils.isEmpty(url)) {
