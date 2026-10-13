@@ -28,17 +28,17 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up JDK 11
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '11'
           cache: 'gradle'
 
       - name: Set up Python 3.8
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.8'
 
@@ -98,11 +98,11 @@ jobs:
             # 对齐优化
             "$BUILD_TOOLS_DIR/zipalign" -f -p 4 "$apk" "$aligned_apk" 2>/dev/null || cp "$apk" "$aligned_apk"
             
-            # 使用 apksigner 进行 V1 + V2 + V3 签名
+            # 使用 apksigner 进行签名
             "$BUILD_TOOLS_DIR/apksigner" sign --ks tvbox.jks --ks-pass pass:123456 --key-pass pass:123456 --ks-key-alias tvbox --out "$signed_apk" "$aligned_apk"
             rm -f "$aligned_apk"
             
-            # 去除文件名中的 -unsigned 标识并覆盖目标
+            # 覆盖原安装包
             final_apk="${apk/-unsigned/}"
             mv -f "$signed_apk" "$final_apk"
             if [ "$final_apk" != "$apk" ]; then
@@ -115,7 +115,8 @@ jobs:
           done
 
       - name: Upload APK Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: TVBox-APKs-${{ github.event.inputs.arch }}-${{ github.event.inputs.build_type }}
           path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
