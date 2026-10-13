@@ -7,7 +7,9 @@ import android.view.Surface;
 import android.view.SurfaceHolder;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
+import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.DefaultLoadControl;
 import com.google.android.exoplayer2.DefaultRenderersFactory;
 import com.google.android.exoplayer2.LoadControl;
@@ -17,6 +19,12 @@ import com.google.android.exoplayer2.Player;
 import com.google.android.exoplayer2.RenderersFactory;
 import com.google.android.exoplayer2.SimpleExoPlayer;
 import com.google.android.exoplayer2.analytics.DefaultAnalyticsCollector;
+import com.google.android.exoplayer2.audio.AudioProcessor;
+import com.google.android.exoplayer2.audio.AudioProcessor.AudioFormat;
+import com.google.android.exoplayer2.audio.AudioProcessor.UnhandledAudioFormatException;
+import com.google.android.exoplayer2.audio.AudioSink;
+import com.google.android.exoplayer2.audio.BaseAudioProcessor;
+import com.google.android.exoplayer2.audio.DefaultAudioSink;
 import com.google.android.exoplayer2.source.DefaultMediaSourceFactory;
 import com.google.android.exoplayer2.source.MediaSource;
 import com.google.android.exoplayer2.trackselection.DefaultTrackSelector;
@@ -27,6 +35,7 @@ import com.google.android.exoplayer2.util.Clock;
 import com.google.android.exoplayer2.util.EventLogger;
 import com.google.android.exoplayer2.video.VideoSize;
 
+import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -71,16 +80,12 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     .build();
         }
 
-        // 配置 TrackSelector：优先挑选 2 声道与 AAC/MP3 兼容格式，同时放行 4K 视频
+        // 配置轨道选择器：放行 4K 10-bit 视频，并优先选择 AAC/MP3 音轨
         if (mTrackSelector == null) {
             DefaultTrackSelector defaultTrackSelector = new DefaultTrackSelector(mAppContext);
             defaultTrackSelector.setParameters(
                     defaultTrackSelector.buildUponParameters()
-                            // 1. 优先选择最大不超过 2 声道的立体声音轨（避开 5.1/7.1）
-                            .setMaxAudioChannelCount(2)
-                            // 2. 优先挑选兼容性最强的音频格式
                             .setPreferredAudioMimeTypes("audio/mp4a-latm", "audio/mpeg")
-                            // 3. 放行 4K 10-bit 视频轨道能力校验限制
                             .setExceedRendererCapabilitiesIfNecessary(true)
                             .setExceedVideoConstraintsIfNecessary(true)
                             .setAllowVideoMixedMimeTypeAdaptiveness(true)
@@ -89,11 +94,29 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             mTrackSelector = defaultTrackSelector;
         }
 
+        // 核心渲染器工厂：硬件解码优先，硬解不支持时降级至 FFmpeg 软解，并挂载多声道自动下混处理器
+        if (mRenderersFactory == null) {
+            mRenderersFactory = new DefaultRenderersFactory(mAppContext) {
+                @Nullable
+                @Override
+                protected AudioSink buildAudioSink(
+                        Context context,
+                        boolean enableFloatOutput,
+                        boolean enableAudioTrackPlaybackParams) {
+                    return new DefaultAudioSink.Builder(context)
+                            .setEnableFloatOutput(enableFloatOutput)
+                            .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                            .setAudioProcessors(new AudioProcessor[]{new StereoDownmixAudioProcessor()})
+                            .build();
+                }
+            }
+            .setEnableDecoderFallback(true) // 硬解失败自动回退软解
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON); // 优先硬件解码，硬件不支持时调用 FFmpeg 软解
+        }
+
         mInternalPlayer = new SimpleExoPlayer.Builder(
                 mAppContext,
-                mRenderersFactory == null ? mRenderersFactory = new DefaultRenderersFactory(mAppContext)
-                        .setEnableDecoderFallback(true) // 启用解码器降级回退
-                        .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER) : mRenderersFactory,
+                mRenderersFactory,
                 mTrackSelector,
                 new DefaultMediaSourceFactory(mAppContext),
                 mLoadControl,
@@ -102,7 +125,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 .build();
         setOptions();
 
-        // 播放器日志（当开启日志且 mTrackSelector 为 MappingTrackSelector 时）
         if (VideoViewManager.getConfig().mIsEnableLog && mTrackSelector instanceof MappingTrackSelector) {
             mInternalPlayer.addAnalyticsListener(new EventLogger((MappingTrackSelector) mTrackSelector, "ExoPlayer"));
         }
@@ -135,7 +157,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void setDataSource(AssetFileDescriptor fd) {
-        // 不支持 AssetFileDescriptor 方式
     }
 
     @Override
@@ -270,7 +291,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void setOptions() {
-        // 准备好就开始播放
         mInternalPlayer.setPlayWhenReady(true);
     }
 
@@ -369,6 +389,71 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             if (videoSize.unappliedRotationDegrees > 0) {
                 mPlayerEventListener.onInfo(MEDIA_INFO_VIDEO_ROTATION_CHANGED, videoSize.unappliedRotationDegrees);
             }
+        }
+    }
+
+    /**
+     * 多声道下混立体声音频处理器：
+     * 仅当解码后的 PCM 声道数大于 2（如 5.1/7.1）时激活，按照 ITU-R 标准下混为 2 声道，避免老旧系统 AudioTrack 崩溃；
+     * 对常规 2.0 立体声或单声道音频，完全直通不处理。
+     */
+    public static class StereoDownmixAudioProcessor extends BaseAudioProcessor {
+
+        @Override
+        public AudioFormat onConfigure(AudioFormat inputAudioFormat) throws UnhandledAudioFormatException {
+            if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT) {
+                throw new UnhandledAudioFormatException(inputAudioFormat);
+            }
+            // 声道数 <= 2 时标记为 NOT_SET，处理器不介入工作（直通）
+            if (inputAudioFormat.channelCount <= 2) {
+                return AudioFormat.NOT_SET;
+            }
+            // 输出强制为 2 声道立体声，保持采样率不变
+            return new AudioFormat(inputAudioFormat.sampleRate, 2, C.ENCODING_PCM_16BIT);
+        }
+
+        @Override
+        public void queueInput(ByteBuffer inputBuffer) {
+            int position = inputBuffer.position();
+            int limit = inputBuffer.limit();
+            int channelCount = inputAudioFormat.channelCount;
+            int frameSize = channelCount * 2; // 16-bit PCM 每个声道占 2 字节
+            int frames = (limit - position) / frameSize;
+            int outputSize = frames * 4; // 双声道输出：2 声道 * 2 字节 = 4 字节/帧
+
+            ByteBuffer buffer = replaceOutputBuffer(outputSize);
+
+            while (position < limit) {
+                short left = inputBuffer.getShort(position);
+                short right = inputBuffer.getShort(position + 2);
+                short center = channelCount > 2 ? inputBuffer.getShort(position + 4) : 0;
+                // 5.1 声道排列：0:左, 1:右, 2:中置, 3:低音, 4:左环绕, 5:右环绕
+                short surroundLeft = channelCount > 4 ? inputBuffer.getShort(position + 8) : 0;
+                short surroundRight = channelCount > 5 ? inputBuffer.getShort(position + 10) : 0;
+                // 7.1 后环绕
+                short backLeft = channelCount > 6 ? inputBuffer.getShort(position + 12) : 0;
+                short backRight = channelCount > 7 ? inputBuffer.getShort(position + 14) : 0;
+
+                // ITU-R BS.775 下混系数：中置与环绕声道乘 0.707 (定点运算：181/256)
+                int cContrib = (center * 181) >> 8;
+                int outL = left + cContrib + ((surroundLeft * 181) >> 8) + ((backLeft * 181) >> 8);
+                int outR = right + cContrib + ((surroundRight * 181) >> 8) + ((backRight * 181) >> 8);
+
+                // 防止整数溢出削峰
+                if (outL > 32767) outL = 32767;
+                else if (outL < -32768) outL = -32768;
+
+                if (outR > 32767) outR = 32767;
+                else if (outR < -32768) outR = -32768;
+
+                buffer.putShort((short) outL);
+                buffer.putShort((short) outR);
+
+                position += frameSize;
+            }
+
+            inputBuffer.position(limit);
+            buffer.flip();
         }
     }
 }
