@@ -71,12 +71,17 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     .build();
         }
 
-        // 配置 TrackSelector，突破 Android 5.1 对 4K/10-bit 的虚标限制
+        // 配置 TrackSelector：优先挑选 2 声道与 AAC/MP3 兼容格式，同时放行 4K 视频
         if (mTrackSelector == null) {
             DefaultTrackSelector defaultTrackSelector = new DefaultTrackSelector(mAppContext);
             defaultTrackSelector.setParameters(
                     defaultTrackSelector.buildUponParameters()
-                            .setExceedRendererCapabilitiesIfNecessary(true) // 允许超出能力上限时强制选择硬解轨道
+                            // 1. 优先选择最大不超过 2 声道的立体声音轨（避开 5.1/7.1）
+                            .setMaxAudioChannelCount(2)
+                            // 2. 优先挑选兼容性最强的音频格式
+                            .setPreferredAudioMimeTypes("audio/mp4a-latm", "audio/mpeg")
+                            // 3. 放行 4K 10-bit 视频轨道能力校验限制
+                            .setExceedRendererCapabilitiesIfNecessary(true)
                             .setExceedVideoConstraintsIfNecessary(true)
                             .setAllowVideoMixedMimeTypeAdaptiveness(true)
                             .setAllowVideoNonSeamlessAdaptiveness(true)
@@ -97,6 +102,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 .build();
         setOptions();
 
+        // 播放器日志（当开启日志且 mTrackSelector 为 MappingTrackSelector 时）
         if (VideoViewManager.getConfig().mIsEnableLog && mTrackSelector instanceof MappingTrackSelector) {
             mInternalPlayer.addAnalyticsListener(new EventLogger((MappingTrackSelector) mTrackSelector, "ExoPlayer"));
         }
@@ -120,7 +126,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
-        Log.i("Tvbox-runtime","echo-setDataSource:"+path);
+        Log.i("Tvbox-runtime", "echo-setDataSource:" + path);
         currentPlayPath = path;
         currentHeaders = copyHeaders(headers);
         mRetriedAsHls = false;
@@ -129,6 +135,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void setDataSource(AssetFileDescriptor fd) {
+        // 不支持 AssetFileDescriptor 方式
     }
 
     @Override
@@ -263,6 +270,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void setOptions() {
+        // 准备好就开始播放
         mInternalPlayer.setPlayWhenReady(true);
     }
 
