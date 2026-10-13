@@ -15,6 +15,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
 import android.text.TextUtils;
+import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.SurfaceView;
@@ -33,6 +34,7 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.ProgressBar;
 import android.widget.TextView;
@@ -526,7 +528,7 @@ public class PlayFragment extends BaseLazyFragment {
     }
 
     /**
-     * 精确居中等比缩放底层视频画面，绝对不影响 UI 控制层
+     * 对标 KODI：按像素计算尺寸并通过 Gravity.CENTER 居中等比缩放
      */
     private void applyVideoZoom(final float zoom) {
         if (mVideoView == null) return;
@@ -535,7 +537,7 @@ public class PlayFragment extends BaseLazyFragment {
             public void run() {
                 if (mVideoView == null) return;
 
-                // 1. 严格确保 VideoView 外层、中间容器以及控制层自身的缩放为 1.0f
+                // 确保外层容器与 UI 控制层绝对不发生几何变换
                 if (mVideoView.getScaleX() != 1.0f || mVideoView.getScaleY() != 1.0f) {
                     mVideoView.setScaleX(1.0f);
                     mVideoView.setScaleY(1.0f);
@@ -545,61 +547,103 @@ public class PlayFragment extends BaseLazyFragment {
                     mController.setScaleY(1.0f);
                 }
 
-                // 2. 穿透视图树，仅寻找真实的画面渲染控件（TextureView / SurfaceView）
-                boolean matched = applyScaleToRenderView(mVideoView, zoom);
+                final View renderView = findRenderView(mVideoView);
+                if (renderView == null) return;
 
-                // 3. 兜底保护：若尚未完成渲染绑定，则对 mPlayerContainer 中除了控制层之外的兄弟渲染视图缩放
-                if (!matched && mVideoView.getChildCount() > 0) {
-                    View playerContainer = mVideoView.getChildAt(0);
-                    if (playerContainer instanceof ViewGroup && playerContainer != mController) {
-                        ViewGroup vg = (ViewGroup) playerContainer;
-                        // 确保 playerContainer 自身不缩放
-                        vg.setScaleX(1.0f);
-                        vg.setScaleY(1.0f);
-                        for (int i = 0; i < vg.getChildCount(); i++) {
-                            View child = vg.getChildAt(i);
-                            if (child != mController && !(child instanceof VodController)) {
-                                setViewPivotAndScale(child, zoom);
-                            }
-                        }
+                // 清除原先残留的 View 级 scale，避免硬件合成器偏移
+                renderView.setScaleX(1.0f);
+                renderView.setScaleY(1.0f);
+
+                int containerWidth = mVideoView.getWidth();
+                int containerHeight = mVideoView.getHeight();
+                if (containerWidth <= 0 || containerHeight <= 0) {
+                    android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+                    containerWidth = dm.widthPixels;
+                    containerHeight = dm.heightPixels;
+                }
+
+                int videoWidth = 0;
+                int videoHeight = 0;
+                if (mController != null && mController.getControlWrapper() != null) {
+                    int[] size = mController.getControlWrapper().getVideoSize();
+                    if (size != null && size.length >= 2) {
+                        videoWidth = size[0];
+                        videoHeight = size[1];
                     }
                 }
+                if (videoWidth <= 0 || videoHeight <= 0) {
+                    int[] size = mVideoView.getVideoSize();
+                    if (size != null && size.length >= 2) {
+                        videoWidth = size[0];
+                        videoHeight = size[1];
+                    }
+                }
+
+                // 底层硬件未上报视频尺寸时延迟重试
+                if (videoWidth <= 0 || videoHeight <= 0) {
+                    mVideoView.postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (mController != null) {
+                                applyVideoZoom(mController.getCurrentZoom());
+                            }
+                        }
+                    }, 300);
+                    return;
+                }
+
+                // 计算视频在当前屏幕容器中的原始基准适应尺寸
+                float videoRatio = (float) videoWidth / (float) videoHeight;
+                float containerRatio = (float) containerWidth / (float) containerHeight;
+                int baseWidth;
+                int baseHeight;
+
+                if (videoRatio > containerRatio) {
+                    baseWidth = containerWidth;
+                    baseHeight = Math.round(containerWidth / videoRatio);
+                } else {
+                    baseHeight = containerHeight;
+                    baseWidth = Math.round(containerHeight * videoRatio);
+                }
+
+                if (Math.abs(zoom - 1.0f) < 0.01f) {
+                    // 重置：恢复默认自适应并居中
+                    FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            Gravity.CENTER);
+                    renderView.setLayoutParams(lp);
+                } else {
+                    // 缩放：按原始宽高比等比换算目标像素，并通过 Gravity.CENTER 绝对居中
+                    int targetWidth = Math.round(baseWidth * zoom);
+                    int targetHeight = Math.round(baseHeight * zoom);
+                    FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                            targetWidth,
+                            targetHeight,
+                            Gravity.CENTER);
+                    renderView.setLayoutParams(lp);
+                }
+                renderView.requestLayout();
             }
         });
     }
 
-    private boolean applyScaleToRenderView(View root, float zoom) {
-        if (root == null || root == mController || root instanceof VodController) {
-            return false;
-        }
-        if (root instanceof TextureView || root instanceof SurfaceView) {
-            setViewPivotAndScale(root, zoom);
-            return true;
-        }
-        if (root instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) root;
-            boolean found = false;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                View child = group.getChildAt(i);
-                if (child != mController && !(child instanceof VodController)) {
-                    if (applyScaleToRenderView(child, zoom)) {
-                        found = true;
-                    }
-                }
+    private View findRenderView(ViewGroup root) {
+        if (root == null) return null;
+        for (int i = 0; i < root.getChildCount(); i++) {
+            View child = root.getChildAt(i);
+            if (child == mController || child instanceof VodController) {
+                continue;
             }
-            return found;
+            if (child instanceof SurfaceView || child instanceof TextureView) {
+                return child;
+            }
+            if (child instanceof ViewGroup) {
+                View found = findRenderView((ViewGroup) child);
+                if (found != null) return found;
+            }
         }
-        return false;
-    }
-
-    private void setViewPivotAndScale(View view, float zoom) {
-        if (view == null) return;
-        if (view.getWidth() > 0 && view.getHeight() > 0) {
-            view.setPivotX(view.getWidth() / 2.0f);
-            view.setPivotY(view.getHeight() / 2.0f);
-        }
-        view.setScaleX(zoom);
-        view.setScaleY(zoom);
+        return null;
     }
 
     private void showCastDialog() {
@@ -970,7 +1014,6 @@ public class PlayFragment extends BaseLazyFragment {
         }, bean, trackInfo.getSubtitleSelected(false));
         dialog.show();
     }
-
     private boolean hasExoInternalSubtitle(AbstractPlayer mediaPlayer) {
         if (!(mediaPlayer instanceof ExoPlayer)) return false;
         TrackInfo trackInfo = ((ExoPlayer) mediaPlayer).getTrackInfo();
@@ -1107,7 +1150,6 @@ public class PlayFragment extends BaseLazyFragment {
         LOG.i("echo-playM3u8:" + url);
         mController.playM3u8(url,headers);
     }
-
     public void goPlayUrl(String url, HashMap<String, String> headers) {
         LOG.i("echo-goPlayUrl:" + url);
         if (TextUtils.isEmpty(url)) {
@@ -3047,8 +3089,8 @@ public class PlayFragment extends BaseLazyFragment {
                     if (loadFoundCount.incrementAndGet() == 1) {
                         stopLoadWebView(false);
                         SuperParse.stopJsonJx();
-                        url = loadFoundVideoUrls.poll();
                         mHandler.removeMessages(MSG_PARSE_TIMEOUT);
+                        url = loadFoundVideoUrls.poll();
                         String cookie = CookieManager.getInstance().getCookie(url);
                         if(!TextUtils.isEmpty(cookie))headers.put("Cookie", " " + cookie);//携带cookie
                         playUrl(url, headers);
