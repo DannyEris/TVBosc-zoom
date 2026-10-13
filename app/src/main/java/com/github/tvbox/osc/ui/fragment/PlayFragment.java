@@ -4,9 +4,11 @@ import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
 import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
@@ -309,6 +311,9 @@ public class PlayFragment extends BaseLazyFragment {
                 if (webPlayUrl != null && isStartedPlayState(playState)) {
                     markPlaybackStarted();
                     hideTipOnUiThread();
+                    if (mController != null) {
+                        mController.applyCurrentZoom();
+                    }
                 }
                 if (switchingPlayback) {
                     if (playState == VideoView.STATE_PLAYBACK_COMPLETED) {
@@ -445,6 +450,9 @@ public class PlayFragment extends BaseLazyFragment {
                 initSubtitleView();
                 if (mVideoView != null) mVideoView.prepared();
                 startDanmuIfReady();
+                if (mController != null) {
+                    mController.applyCurrentZoom();
+                }
             }
             @Override
             public void startPlayUrl(String url, HashMap<String, String> headers) {
@@ -465,6 +473,57 @@ public class PlayFragment extends BaseLazyFragment {
 
             @Override
             public void setAllowSwitchPlayer(boolean isAllow){allowSwitchPlayer=isAllow;}
+
+            @Override
+            public void onVideoZoomChange(float zoom) {
+                if (mVideoView != null) {
+                    View renderContainer = mVideoView.getChildAt(0);
+                    if (renderContainer != null) {
+                        renderContainer.setScaleX(zoom);
+                        renderContainer.setScaleY(zoom);
+                    }
+                }
+            }
+
+            @Override
+            public void startExternalPlayer() {
+                if (TextUtils.isEmpty(webPlayUrl)) {
+                    Toast.makeText(mContext, "当前暂无可播放地址", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                try {
+                    if (mVideoView != null) {
+                        mVideoView.pause();
+                    }
+                    Intent intent = new Intent(Intent.ACTION_VIEW);
+                    intent.setDataAndType(Uri.parse(webPlayUrl), "video/*");
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+
+                    intent.putExtra("title", getCastTitle());
+                    long position = getCastPosition();
+                    if (position > 0) {
+                        intent.putExtra("position", (int) position);
+                    }
+
+                    if (webHeaderMap != null && !webHeaderMap.isEmpty()) {
+                        Bundle headersBundle = new Bundle();
+                        String[] headersArray = new String[webHeaderMap.size() * 2];
+                        int i = 0;
+                        for (Map.Entry<String, String> entry : webHeaderMap.entrySet()) {
+                            headersBundle.putString(entry.getKey(), entry.getValue());
+                            headersArray[i++] = entry.getKey();
+                            headersArray[i++] = entry.getValue();
+                        }
+                        intent.putExtra("headers", headersArray);
+                        intent.putExtra("android.media.intent.extra.HTTP_HEADERS", headersBundle);
+                    }
+
+                    Intent chooser = Intent.createChooser(intent, "选择外部播放器");
+                    startActivity(chooser);
+                } catch (Exception e) {
+                    Toast.makeText(mContext, "启动外部播放器失败: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                }
+            }
         });
         mVideoView.setVideoController(mController);
     }
