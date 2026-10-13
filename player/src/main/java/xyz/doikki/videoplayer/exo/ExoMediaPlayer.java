@@ -22,6 +22,7 @@ import com.google.android.exoplayer2.LoadControl;
 import com.google.android.exoplayer2.PlaybackException;
 import com.google.android.exoplayer2.PlaybackParameters;
 import com.google.android.exoplayer2.Player;
+import com.google.android.exoplayer2.Renderer;
 import com.google.android.exoplayer2.RenderersFactory;
 import com.google.android.exoplayer2.SimpleExoPlayer;
 import com.google.android.exoplayer2.analytics.DefaultAnalyticsCollector;
@@ -29,9 +30,12 @@ import com.google.android.exoplayer2.audio.AudioCapabilities;
 import com.google.android.exoplayer2.audio.AudioProcessor;
 import com.google.android.exoplayer2.audio.AudioProcessor.AudioFormat;
 import com.google.android.exoplayer2.audio.AudioProcessor.UnhandledAudioFormatException;
+import com.google.android.exoplayer2.audio.AudioRendererEventListener;
 import com.google.android.exoplayer2.audio.AudioSink;
 import com.google.android.exoplayer2.audio.BaseAudioProcessor;
 import com.google.android.exoplayer2.audio.DefaultAudioSink;
+import com.google.android.exoplayer2.audio.MediaCodecAudioRenderer;
+import com.google.android.exoplayer2.mediacodec.MediaCodecSelector;
 import com.google.android.exoplayer2.source.DefaultMediaSourceFactory;
 import com.google.android.exoplayer2.source.MediaSource;
 import com.google.android.exoplayer2.trackselection.DefaultTrackSelector;
@@ -44,9 +48,11 @@ import com.google.android.exoplayer2.video.VideoSize;
 
 import java.io.File;
 import java.io.FileWriter;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Locale;
@@ -138,30 +144,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             mTrackSelector = defaultTrackSelector;
         }
 
-        if (mRenderersFactory == null) {
-            mRenderersFactory = new DefaultRenderersFactory(mAppContext) {
-                @Nullable
-                @Override
-                protected AudioSink buildAudioSink(
-                        Context context,
-                        boolean enableFloatOutput,
-                        boolean enableAudioTrackPlaybackParams,
-                        boolean enableOffload) {
-                    
-                    // 关键修复：显式锁定仅接收 PCM 16-bit，彻底关闭硬件伪透传，强制触发 FFmpeg 软解
-                    AudioCapabilities pcmOnlyCapabilities = new AudioCapabilities(new int[]{C.ENCODING_PCM_16BIT}, 8);
-
-                    return new DefaultAudioSink.Builder(context)
-                            .setAudioCapabilities(pcmOnlyCapabilities) // 彻底杜绝透传，强制解码为 PCM
-                            .setEnableFloatOutput(false)               // 锁死 16-bit 整型 PCM
-                            .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
-                            .setAudioProcessors(new AudioProcessor[]{new AdaptiveDownmixAudioProcessor(context)})
-                            .build();
-                }
-            }
-            .setEnableDecoderFallback(true)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER);
-        }
+        mRenderersFactory = createCustomRenderersFactory();
 
         mInternalPlayer = new SimpleExoPlayer.Builder(
                 mAppContext,
@@ -181,6 +164,62 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             trackSelector = (DefaultTrackSelector) mTrackSelector;
         }
         mInternalPlayer.addListener(this);
+    }
+
+    private RenderersFactory createCustomRenderersFactory() {
+        return new DefaultRenderersFactory(mAppContext) {
+            @Override
+            protected void buildAudioRenderers(
+                    Context context,
+                    int extensionRendererMode,
+                    MediaCodecSelector mediaCodecSelector,
+                    boolean enableDecoderFallback,
+                    AudioSink audioSink,
+                    Handler eventHandler,
+                    AudioRendererEventListener eventListener,
+                    ArrayList<Renderer> out) {
+
+                writeDebugLog(context, "[buildAudioRenderers] 构建音频管线，锁定 FFmpeg 第一顺位...");
+
+                // 1. 将 FfmpegAudioRenderer 注册为第一顺位（接管 DTS/EAC3/TrueHD 等全部软解）
+                boolean ffmpegAdded = false;
+                try {
+                    Class<?> clazz = Class.forName("com.google.android.exoplayer2.ext.ffmpeg.FfmpegAudioRenderer");
+                    Constructor<?> constructor = clazz.getConstructor(
+                            Handler.class, AudioRendererEventListener.class, AudioSink.class);
+                    Renderer ffmpegRenderer = (Renderer) constructor.newInstance(eventHandler, eventListener, audioSink);
+                    out.add(ffmpegRenderer);
+                    ffmpegAdded = true;
+                    writeDebugLog(context, "[buildAudioRenderers] 成功将 FfmpegAudioRenderer 注册为第 1 顺位！");
+                } catch (Throwable e) {
+                    writeDebugLog(context, "[buildAudioRenderers] 反射创建 FfmpegAudioRenderer 失败: " + e.getMessage());
+                }
+
+                // 2. 挂载 MediaCodecAudioRenderer 作为保底兜底
+                out.add(new MediaCodecAudioRenderer(
+                        context, mediaCodecSelector, enableDecoderFallback, eventHandler, eventListener, audioSink));
+                writeDebugLog(context, "[buildAudioRenderers] 渲染器就绪, 数量=" + out.size() + ", FFmpeg优先=" + ffmpegAdded);
+            }
+
+            @Nullable
+            @Override
+            protected AudioSink buildAudioSink(
+                    Context context,
+                    boolean enableFloatOutput,
+                    boolean enableAudioTrackPlaybackParams,
+                    boolean enableOffload) {
+
+                // 允许最高 8 声道 PCM，杜绝压缩比特流伪透传
+                AudioCapabilities pcmCapabilities = new AudioCapabilities(new int[]{C.ENCODING_PCM_16BIT}, 8);
+
+                return new DefaultAudioSink.Builder(context)
+                        .setAudioCapabilities(pcmCapabilities)
+                        .setEnableFloatOutput(false)
+                        .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                        .setAudioProcessors(new AudioProcessor[]{new SmartSurroundAudioProcessor(context)})
+                        .build();
+            }
+        };
     }
 
     private void checkFfmpegExtensionStatus() {
@@ -215,6 +254,13 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         } catch (Throwable e) {
             writeDebugLog(mAppContext, "[自检异常] 无法调用 FfmpegLibrary: " + e.getMessage());
         }
+
+        try {
+            Class<?> rendererClass = Class.forName("com.google.android.exoplayer2.ext.ffmpeg.FfmpegAudioRenderer");
+            writeDebugLog(mAppContext, "[自检] FfmpegAudioRenderer 类已定位: " + rendererClass.getName());
+        } catch (Throwable t) {
+            writeDebugLog(mAppContext, "[自检警告] 找不到 FfmpegAudioRenderer 类: " + t.getMessage());
+        }
     }
 
     public void setTrackSelector(TrackSelector trackSelector) {
@@ -235,6 +281,8 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         currentPlayPath = path;
         currentHeaders = copyHeaders(headers);
         mRetriedAsHls = false;
+        // 每次切片源时复位容灾标志，优先尝试原生环绕声
+        SmartSurroundAudioProcessor.setForceStereoFallback(false);
         mMediaSource = mMediaSourceHelper.getMediaSource(path, copyHeaders(currentHeaders));
     }
 
@@ -408,13 +456,24 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
         writeDebugLog(mAppContext, "[播放报错] " + errDetail);
 
+        // 如果是音频管道/解码异常
         if (error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED) {
 
-            showToast("音频解码异常: " + (cause != null ? cause.getMessage() : error.getErrorCodeName()) + " -> 正在回退音轨");
+            // 第一重容灾：若多声道原生输出导致声卡抛错，自动降级为立体声下混模式重试
+            if (!SmartSurroundAudioProcessor.isForceStereoFallback()) {
+                writeDebugLog(mAppContext, "[智能容灾触发] 多声道 AudioTrack 异常，自动降级为 2.0 立体声下混并重新准备！");
+                SmartSurroundAudioProcessor.setForceStereoFallback(true);
+                if (mInternalPlayer != null) {
+                    mInternalPlayer.prepare();
+                    mInternalPlayer.setPlayWhenReady(true);
+                    return;
+                }
+            }
 
+            // 第二重容灾：已经是立体声仍失败，恢复默认主音轨
             if (trackSelector != null && mInternalPlayer != null) {
                 writeDebugLog(mAppContext, "[容灾生效] 重置音轨到默认");
                 trackSelector.setParameters(trackSelector.buildUponParameters().clearSelectionOverrides(C.TRACK_TYPE_AUDIO));
@@ -466,10 +525,25 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
     }
 
-    public static class AdaptiveDownmixAudioProcessor extends BaseAudioProcessor {
+    /**
+     * 智能多声道自适应与立体声降混处理器：
+     * 1. 当终端支持 5.1/7.1 时，直通原生多声道 PCM，保留物理独立环绕声效果；
+     * 2. 当终端仅支持 2.0 时，执行 ITU-R BS.775 标准立体声下混；
+     * 3. 若声卡抛出多声道异常，启动容灾降级下混。
+     */
+    public static class SmartSurroundAudioProcessor extends BaseAudioProcessor {
         private final Context mContext;
+        private static volatile boolean sForceStereoFallback = false;
 
-        public AdaptiveDownmixAudioProcessor(Context context) {
+        public static void setForceStereoFallback(boolean force) {
+            sForceStereoFallback = force;
+        }
+
+        public static boolean isForceStereoFallback() {
+            return sForceStereoFallback;
+        }
+
+        public SmartSurroundAudioProcessor(Context context) {
             this.mContext = context.getApplicationContext();
         }
 
@@ -479,32 +553,43 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     + ", channels=" + inputAudioFormat.channelCount + ", encoding=" + inputAudioFormat.encoding);
 
             if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT) {
-                writeDebugLog(mContext, "[AudioProcessor] 非 16-bit PCM，直通输出");
                 return AudioFormat.NOT_SET;
             }
             if (inputAudioFormat.channelCount <= 2) {
-                writeDebugLog(mContext, "[AudioProcessor] <=2 声道，直通输出");
                 return AudioFormat.NOT_SET;
             }
 
-            int maxSupportedChannels = getMaxSupportedOutputChannels();
-            writeDebugLog(mContext, "[AudioProcessor] 终端最大支持声道数: " + maxSupportedChannels);
+            // 触发容灾模式：强制下混到 2.0
+            if (sForceStereoFallback) {
+                writeDebugLog(mContext, "[AudioProcessor] 容灾下混模式生效: " + inputAudioFormat.channelCount + " 声道 -> 2 声道");
+                return new AudioFormat(inputAudioFormat.sampleRate, 2, C.ENCODING_PCM_16BIT);
+            }
 
+            // 动态探测 HDMI 终端最大物理声道
+            int maxSupportedChannels = getMaxSupportedOutputChannels(mContext);
+            writeDebugLog(mContext, "[AudioProcessor] 终端最大支持物理声道: " + maxSupportedChannels);
+
+            // 若连接 5.1/7.1 独立音响且终端支持，放行原生多声道 PCM
             if (inputAudioFormat.channelCount <= maxSupportedChannels) {
-                writeDebugLog(mContext, "[AudioProcessor] 终端支持多声道，直通 5.1/7.1 输出");
+                writeDebugLog(mContext, "[AudioProcessor] 识别到 5.1/7.1 功放终端，放行原生 "
+                        + inputAudioFormat.channelCount + " 声道 PCM 直通输出！");
                 return AudioFormat.NOT_SET;
             }
 
-            writeDebugLog(mContext, "[AudioProcessor] 触发立体声降混 (6/8 -> 2)");
+            // 直连普通 2 声道电视，执行标准立体声下混
+            writeDebugLog(mContext, "[AudioProcessor] 普通双声道终端，执行 ITU-R BS.775 下混: "
+                    + inputAudioFormat.channelCount + " 声道 -> 2 声道");
             return new AudioFormat(inputAudioFormat.sampleRate, 2, C.ENCODING_PCM_16BIT);
         }
 
-        private int getMaxSupportedOutputChannels() {
+        private static int getMaxSupportedOutputChannels(Context context) {
             try {
-                Intent intent = mContext.registerReceiver(null, new IntentFilter("android.media.action.HDMI_AUDIO_PLUG"));
+                Intent intent = context.registerReceiver(null, new IntentFilter("android.media.action.HDMI_AUDIO_PLUG"));
                 if (intent != null && intent.getIntExtra("android.media.extra.AUDIO_PLUG_STATE", 0) == 1) {
                     int maxChannels = intent.getIntExtra("android.media.extra.MAX_CHANNEL_COUNT", 2);
-                    if (maxChannels > 0) return maxChannels;
+                    if (maxChannels > 0) {
+                        return maxChannels;
+                    }
                 }
             } catch (Throwable ignored) {
             }
@@ -532,6 +617,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 short backLeft = channelCount > 6 ? inputBuffer.getShort(position + 12) : 0;
                 short backRight = channelCount > 7 ? inputBuffer.getShort(position + 14) : 0;
 
+                // ITU-R BS.775 混音系数：中置与环绕 0.707 (181/256)，低频 0.5 (128/256)
                 int cContrib = (center * 181) >> 8;
                 int lfeContrib = (lfe * 128) >> 8;
                 int outL = left + cContrib + lfeContrib + ((surroundLeft * 181) >> 8) + ((backLeft * 181) >> 8);
