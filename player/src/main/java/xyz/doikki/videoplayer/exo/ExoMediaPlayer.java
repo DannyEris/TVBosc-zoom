@@ -5,9 +5,12 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.res.AssetFileDescriptor;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.Surface;
 import android.view.SurfaceHolder;
+import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -38,8 +41,14 @@ import com.google.android.exoplayer2.util.Clock;
 import com.google.android.exoplayer2.util.EventLogger;
 import com.google.android.exoplayer2.video.VideoSize;
 
+import java.io.File;
+import java.io.FileWriter;
+import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import xyz.doikki.videoplayer.player.AbstractPlayer;
@@ -48,24 +57,54 @@ import xyz.doikki.videoplayer.util.PlayerUtils;
 
 public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
+    private static final String TAG = "EXO-AUDIO";
+
     protected Context mAppContext;
     protected SimpleExoPlayer mInternalPlayer;
     protected MediaSource mMediaSource;
     protected ExoMediaSourceHelper mMediaSourceHelper;
 
     private PlaybackParameters mSpeedPlaybackParameters;
-
     private boolean mIsPreparing;
-
     private LoadControl mLoadControl;
     private RenderersFactory mRenderersFactory;
     protected TrackSelector mTrackSelector;
-
     protected DefaultTrackSelector trackSelector;
 
     protected String currentPlayPath;
     protected Map<String, String> currentHeaders;
     private boolean mRetriedAsHls;
+
+    private static void writeDebugLog(Context context, String msg) {
+        Log.e(TAG, msg);
+        try {
+            File logFile = new File(context.getExternalFilesDir(null), "exo_debug.log");
+            if (!logFile.exists()) {
+                File sdLog = new File("/sdcard/exo_debug.log");
+                if (sdLog.canWrite() || !sdLog.exists()) {
+                    logFile = sdLog;
+                }
+            }
+            String time = new SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
+            FileWriter writer = new FileWriter(logFile, true);
+            writer.write(time + " " + msg + "\n");
+            writer.flush();
+            writer.close();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void showToast(final String msg) {
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Toast.makeText(mAppContext, msg, Toast.LENGTH_LONG).show();
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+    }
 
     public ExoMediaPlayer(Context context) {
         mAppContext = context.getApplicationContext();
@@ -74,6 +113,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void initPlayer() {
+        // 1. 深度自检 FFmpeg 扩展库与 JNI 状态
+        checkFfmpegExtensionStatus();
+
         if (mLoadControl == null) {
             mLoadControl = new DefaultLoadControl.Builder()
                     .setBufferDurationsMs(15_000, 30_000, 1_000, 3_000)
@@ -83,7 +125,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     .build();
         }
 
-        // 配置轨道选择器：优先选用 AAC / MP3 音轨，同时放行 4K 10-bit 视频
         if (mTrackSelector == null) {
             DefaultTrackSelector defaultTrackSelector = new DefaultTrackSelector(mAppContext);
             defaultTrackSelector.setParameters(
@@ -97,7 +138,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             mTrackSelector = defaultTrackSelector;
         }
 
-        // 渲染器工厂：FFmpeg 优先软解，锁死 16-bit PCM，并挂载自适应声道处理器
         if (mRenderersFactory == null) {
             mRenderersFactory = new DefaultRenderersFactory(mAppContext) {
                 @Nullable
@@ -108,14 +148,14 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         boolean enableAudioTrackPlaybackParams,
                         boolean enableOffload) {
                     return new DefaultAudioSink.Builder(context)
-                            .setEnableFloatOutput(false) // 强制 16-bit 整型 PCM，消除 Android 5.1 浮点静音
+                            .setEnableFloatOutput(false)
                             .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
                             .setAudioProcessors(new AudioProcessor[]{new AdaptiveDownmixAudioProcessor(context)})
                             .build();
                 }
             }
             .setEnableDecoderFallback(true)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER); // 优先调用全解码版 FFmpeg
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER);
         }
 
         mInternalPlayer = new SimpleExoPlayer.Builder(
@@ -138,6 +178,29 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         mInternalPlayer.addListener(this);
     }
 
+    private void checkFfmpegExtensionStatus() {
+        try {
+            Class<?> ffmpegLibClass = Class.forName("com.google.android.exoplayer2.ext.ffmpeg.FfmpegLibrary");
+            Method isAvailableMethod = ffmpegLibClass.getMethod("isAvailable");
+            boolean isAvailable = (Boolean) isAvailableMethod.invoke(null);
+            String info = "[自检] FfmpegLibrary.isAvailable = " + isAvailable;
+            if (isAvailable) {
+                try {
+                    Method getVersionMethod = ffmpegLibClass.getMethod("getVersion");
+                    info += " (FFmpeg 版本: " + getVersionMethod.invoke(null) + ")";
+                } catch (Throwable ignored) {
+                }
+            }
+            writeDebugLog(mAppContext, info);
+            if (!isAvailable) {
+                showToast("警告: FFmpeg 软解扩展加载失败 (isAvailable=false)");
+            }
+        } catch (Throwable e) {
+            writeDebugLog(mAppContext, "[自检异常] 无法加载 FfmpegLibrary: " + e.getMessage());
+            showToast("错误: 未找到 FFmpeg 扩展组件类");
+        }
+    }
+
     public void setTrackSelector(TrackSelector trackSelector) {
         mTrackSelector = trackSelector;
     }
@@ -152,7 +215,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
-        Log.i("Tvbox-runtime", "echo-setDataSource:" + path);
+        writeDebugLog(mAppContext, "setDataSource: " + path);
         currentPlayPath = path;
         currentHeaders = copyHeaders(headers);
         mRetriedAsHls = false;
@@ -165,30 +228,25 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void start() {
-        if (mInternalPlayer == null)
-            return;
+        if (mInternalPlayer == null) return;
         mInternalPlayer.setPlayWhenReady(true);
     }
 
     @Override
     public void pause() {
-        if (mInternalPlayer == null)
-            return;
+        if (mInternalPlayer == null) return;
         mInternalPlayer.setPlayWhenReady(false);
     }
 
     @Override
     public void stop() {
-        if (mInternalPlayer == null)
-            return;
+        if (mInternalPlayer == null) return;
         mInternalPlayer.stop();
     }
 
     @Override
     public void prepareAsync() {
-        if (mInternalPlayer == null)
-            return;
-        if (mMediaSource == null) return;
+        if (mInternalPlayer == null || mMediaSource == null) return;
         if (mSpeedPlaybackParameters != null) {
             mInternalPlayer.setPlaybackParameters(mSpeedPlaybackParameters);
         }
@@ -215,24 +273,14 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public boolean isPlaying() {
-        if (mInternalPlayer == null)
-            return false;
+        if (mInternalPlayer == null) return false;
         int state = mInternalPlayer.getPlaybackState();
-        switch (state) {
-            case Player.STATE_BUFFERING:
-            case Player.STATE_READY:
-                return mInternalPlayer.getPlayWhenReady();
-            case Player.STATE_IDLE:
-            case Player.STATE_ENDED:
-            default:
-                return false;
-        }
+        return (state == Player.STATE_BUFFERING || state == Player.STATE_READY) && mInternalPlayer.getPlayWhenReady();
     }
 
     @Override
     public void seekTo(long time) {
-        if (mInternalPlayer == null)
-            return;
+        if (mInternalPlayer == null) return;
         mInternalPlayer.seekTo(time);
     }
 
@@ -249,16 +297,12 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public long getCurrentPosition() {
-        if (mInternalPlayer == null)
-            return 0;
-        return mInternalPlayer.getCurrentPosition();
+        return mInternalPlayer == null ? 0 : mInternalPlayer.getCurrentPosition();
     }
 
     @Override
     public long getDuration() {
-        if (mInternalPlayer == null)
-            return 0;
-        return mInternalPlayer.getDuration();
+        return mInternalPlayer == null ? 0 : mInternalPlayer.getDuration();
     }
 
     @Override
@@ -275,22 +319,21 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void setDisplay(SurfaceHolder holder) {
-        if (holder == null)
-            setSurface(null);
-        else
-            setSurface(holder.getSurface());
+        setSurface(holder == null ? null : holder.getSurface());
     }
 
     @Override
     public void setVolume(float leftVolume, float rightVolume) {
-        if (mInternalPlayer != null)
+        if (mInternalPlayer != null) {
             mInternalPlayer.setVolume((leftVolume + rightVolume) / 2);
+        }
     }
 
     @Override
     public void setLooping(boolean isLooping) {
-        if (mInternalPlayer != null)
+        if (mInternalPlayer != null) {
             mInternalPlayer.setRepeatMode(isLooping ? Player.REPEAT_MODE_ALL : Player.REPEAT_MODE_OFF);
+        }
     }
 
     @Override
@@ -300,19 +343,15 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void setSpeed(float speed) {
-        PlaybackParameters playbackParameters = new PlaybackParameters(speed);
-        mSpeedPlaybackParameters = playbackParameters;
+        mSpeedPlaybackParameters = new PlaybackParameters(speed);
         if (mInternalPlayer != null) {
-            mInternalPlayer.setPlaybackParameters(playbackParameters);
+            mInternalPlayer.setPlaybackParameters(mSpeedPlaybackParameters);
         }
     }
 
     @Override
     public float getSpeed() {
-        if (mSpeedPlaybackParameters != null) {
-            return mSpeedPlaybackParameters.speed;
-        }
-        return 1f;
+        return mSpeedPlaybackParameters != null ? mSpeedPlaybackParameters.speed : 1f;
     }
 
     @Override
@@ -346,14 +385,23 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void onPlayerError(PlaybackException error) {
-        Log.e("Tvbox-runtime", "echo-Exo player error: " + currentPlayPath, error);
+        String errDetail = "errorCode=" + error.errorCode + " (" + error.getErrorCodeName() + "), msg=" + error.getMessage();
+        Throwable cause = error.getCause();
+        if (cause != null) {
+            errDetail += " | cause: " + cause.getClass().getSimpleName() + ": " + cause.getMessage();
+        }
+        writeDebugLog(mAppContext, "[播放报错] " + errDetail);
 
-        // 防崩溃容灾：若因声道不支持或解码异常导致崩溃，自动重置并恢复默认音轨
+        // 如果是音频解码器或 AudioTrack 失败引发的错误
         if (error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED
-                || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED) {
+                || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED
+                || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED) {
+
+            showToast("音频解码崩溃: " + (cause != null ? cause.getMessage() : error.getErrorCodeName()) + " -> 正在回退音轨");
+
             if (trackSelector != null && mInternalPlayer != null) {
-                Log.w("Tvbox-runtime", "echo-Exo Audio decode failed, resetting to default track");
+                writeDebugLog(mAppContext, "[容灾生效] 重置音轨到默认");
                 trackSelector.setParameters(trackSelector.buildUponParameters().clearSelectionOverrides(C.TRACK_TYPE_AUDIO));
                 mInternalPlayer.prepare();
                 mInternalPlayer.setPlayWhenReady(true);
@@ -370,14 +418,16 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     }
 
     private boolean retryAsHls(PlaybackException error) {
-        if (mRetriedAsHls || mInternalPlayer == null || currentPlayPath == null) {
-            return false;
-        }
-        if (!isParsingError(error)) {
-            return false;
-        }
+        if (mRetriedAsHls || mInternalPlayer == null || currentPlayPath == null) return false;
+        int errorCode = error.errorCode;
+        boolean isParsingError = errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED
+                || errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED
+                || errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED
+                || errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED
+                || errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED;
+        if (!isParsingError) return false;
         mRetriedAsHls = true;
-        Log.i("Tvbox-runtime", "echo-Exo retry as HLS: " + currentPlayPath);
+        writeDebugLog(mAppContext, "retryAsHls: " + currentPlayPath);
         mMediaSource = mMediaSourceHelper.getHlsMediaSource(currentPlayPath, copyHeaders(currentHeaders));
         mIsPreparing = true;
         mInternalPlayer.setMediaSource(mMediaSource, getStartPosition());
@@ -385,15 +435,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         mInternalPlayer.prepare();
         mInternalPlayer.setPlayWhenReady(true);
         return true;
-    }
-
-    private boolean isParsingError(PlaybackException error) {
-        int errorCode = error.errorCode;
-        return errorCode == PlaybackException.ERROR_CODE_IO_UNSPECIFIED
-                || errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED
-                || errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED
-                || errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED
-                || errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED;
     }
 
     private Map<String, String> copyHeaders(Map<String, String> headers) {
@@ -410,15 +451,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
     }
 
-    /**
-     * 自适应多声道降混音频处理器：
-     * 1. 动态探测当前 HDMI / 终端设备实际支持的最大物理声道数；
-     * 2. 若终端支持 5.1/7.1（如外接独立功放、家庭影院），直通输出原生多声道 PCM，保留真实环绕声定位；
-     * 3. 若终端仅支持 2 声道（如直连普通电视喇叭），自动执行 ITU-R BS.775 标准降混为立体声，杜绝崩溃；
-     * 4. 非 PCM 16-bit 格式或常规 <=2 声道音频完全直通。
-     */
     public static class AdaptiveDownmixAudioProcessor extends BaseAudioProcessor {
-
         private final Context mContext;
 
         public AdaptiveDownmixAudioProcessor(Context context) {
@@ -427,21 +460,27 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
         @Override
         public AudioFormat onConfigure(AudioFormat inputAudioFormat) throws UnhandledAudioFormatException {
+            writeDebugLog(mContext, "[AudioProcessor] 输入格式: sampleRate=" + inputAudioFormat.sampleRate
+                    + ", channels=" + inputAudioFormat.channelCount + ", encoding=" + inputAudioFormat.encoding);
+
             if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT) {
+                writeDebugLog(mContext, "[AudioProcessor] 非 16-bit PCM，直通输出");
                 return AudioFormat.NOT_SET;
             }
             if (inputAudioFormat.channelCount <= 2) {
+                writeDebugLog(mContext, "[AudioProcessor] <=2 声道，直通输出");
                 return AudioFormat.NOT_SET;
             }
 
-            // 动态读取当前音频终端最大支持的物理声道数
             int maxSupportedChannels = getMaxSupportedOutputChannels();
+            writeDebugLog(mContext, "[AudioProcessor] 终端最大支持声道数: " + maxSupportedChannels);
+
             if (inputAudioFormat.channelCount <= maxSupportedChannels) {
-                // 外接 5.1/7.1 音响或回音壁时，直通多声道 PCM，保留原生环绕效果
+                writeDebugLog(mContext, "[AudioProcessor] 终端支持多声道，直通 5.1/7.1 输出");
                 return AudioFormat.NOT_SET;
             }
 
-            // 设备仅支持 2 声道（如直连普通电视喇叭），降混为 2 声道立体声输出
+            writeDebugLog(mContext, "[AudioProcessor] 触发立体声降混 (6/8 -> 2)");
             return new AudioFormat(inputAudioFormat.sampleRate, 2, C.ENCODING_PCM_16BIT);
         }
 
@@ -450,13 +489,10 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 Intent intent = mContext.registerReceiver(null, new IntentFilter("android.media.action.HDMI_AUDIO_PLUG"));
                 if (intent != null && intent.getIntExtra("android.media.extra.AUDIO_PLUG_STATE", 0) == 1) {
                     int maxChannels = intent.getIntExtra("android.media.extra.MAX_CHANNEL_COUNT", 2);
-                    if (maxChannels > 0) {
-                        return maxChannels;
-                    }
+                    if (maxChannels > 0) return maxChannels;
                 }
             } catch (Throwable ignored) {
             }
-            // Android 7.0 (API 24) 及以上系统原生自带底层混合管道；Android 5.1 及以下未探测到外设时默认按 2 声道安全输出
             return Build.VERSION.SDK_INT >= Build.VERSION_CODES.N ? 8 : 2;
         }
 
@@ -481,7 +517,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 short backLeft = channelCount > 6 ? inputBuffer.getShort(position + 12) : 0;
                 short backRight = channelCount > 7 ? inputBuffer.getShort(position + 14) : 0;
 
-                // ITU-R BS.775 混音模型：中置与环绕声道按 0.707 (181/256) 混入，低频 LFE 按 0.5 (128/256) 补偿保留
                 int cContrib = (center * 181) >> 8;
                 int lfeContrib = (lfe * 128) >> 8;
                 int outL = left + cContrib + lfeContrib + ((surroundLeft * 181) >> 8) + ((backLeft * 181) >> 8);
