@@ -87,6 +87,7 @@ import static xyz.doikki.videoplayer.util.PlayerUtils.stringForTime;
 import static xyz.doikki.videoplayer.util.PlayerUtils.safeTimeMs;
 
 public class VodController extends BaseController {
+    public static final int PLAYER_TYPE_EXTERNAL = -999;
     private static final float PORTRAIT_EPISODE_SWIPE_DP = 80f;
     private static final long PORTRAIT_EPISODE_TITLE_SHOW_MS = 3000L;
     private boolean portraitEpisodeSwipeTriggered;
@@ -230,6 +231,10 @@ public class VodController extends BaseController {
     TextView mNextBtn;
     TextView mPreBtn;
     TextView mPlayerScaleBtn;
+    TextView mPlayZoomInBtn;
+    TextView mPlayZoomResetBtn;
+    TextView mPlayZoomOutBtn;
+    private float currentZoom = 1.0f;
     public TextView mPlayerSpeedBtn;
     TextView mPlayerBtn;
     TextView mPlayerIJKBtn;
@@ -345,6 +350,12 @@ public class VodController extends BaseController {
         mNextBtn = findViewById(R.id.play_next);
         mPreBtn = findViewById(R.id.play_pre);
         mPlayerScaleBtn = findViewById(R.id.play_scale);
+
+        // 初始化缩放控件
+        mPlayZoomInBtn = findViewById(R.id.play_zoom_in);
+        mPlayZoomResetBtn = findViewById(R.id.play_zoom_reset);
+        mPlayZoomOutBtn = findViewById(R.id.play_zoom_out);
+
         mPlayerSpeedBtn = findViewById(R.id.play_speed);
         mPlayerBtn = findViewById(R.id.play_player);
         mPlayerIJKBtn = findViewById(R.id.play_ijk);
@@ -634,6 +645,39 @@ public class VodController extends BaseController {
                 return true;
             }
         });
+
+        // 缩放按键事件绑定
+        if (mPlayZoomInBtn != null) {
+            mPlayZoomInBtn.setOnClickListener(new OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    myHandle.removeCallbacks(myRunnable);
+                    myHandle.postDelayed(myRunnable, myHandleSeconds);
+                    changeZoom(0.05f);
+                }
+            });
+        }
+        if (mPlayZoomResetBtn != null) {
+            mPlayZoomResetBtn.setOnClickListener(new OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    myHandle.removeCallbacks(myRunnable);
+                    myHandle.postDelayed(myRunnable, myHandleSeconds);
+                    changeZoom(0.0f);
+                }
+            });
+        }
+        if (mPlayZoomOutBtn != null) {
+            mPlayZoomOutBtn.setOnClickListener(new OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    myHandle.removeCallbacks(myRunnable);
+                    myHandle.postDelayed(myRunnable, myHandleSeconds);
+                    changeZoom(-0.05f);
+                }
+            });
+        }
+
         mPlayerSpeedBtn.setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -661,35 +705,14 @@ public class VodController extends BaseController {
                 return true;
             }
         });
+
+        // 点击底部播放器内核按钮直接弹出选择菜单
         mPlayerBtn.setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View view) {
                 myHandle.removeCallbacks(myRunnable);
                 myHandle.postDelayed(myRunnable, myHandleSeconds);
-                try {
-                    int playerType = mPlayerConfig.getInt("pl");
-                    ArrayList<Integer> exsitPlayerTypes = PlayerHelper.getExistPlayerTypes();
-                    int playerTypeIdx = 0;
-                    int playerTypeSize = exsitPlayerTypes.size();
-                    for(int i = 0; i<playerTypeSize; i++) {
-                        if (playerType == exsitPlayerTypes.get(i)) {
-                            if (i == playerTypeSize - 1) {
-                                playerTypeIdx = 0;
-                            } else {
-                                playerTypeIdx = i + 1;
-                            }
-                        }
-                    }
-                    playerType = exsitPlayerTypes.get(playerTypeIdx);
-                    mPlayerConfig.put("pl", playerType);
-                    updatePlayerCfgView();
-                    listener.updatePlayerCfg();
-                    listener.replay(false);
-                    listener.setAllowSwitchPlayer(false);
-                    hideBottom();
-                } catch (JSONException e) {
-                    e.printStackTrace();
-                }
+                showPlayerSelectDialog();
             }
         });
 
@@ -699,61 +722,11 @@ public class VodController extends BaseController {
                 myHandle.removeCallbacks(myRunnable);
                 myHandle.postDelayed(myRunnable, myHandleSeconds);
                 FastClickCheckUtil.check(view);
-                try {
-                    int playerType = mPlayerConfig.getInt("pl");
-                    int defaultPos = 0;
-                    ArrayList<Integer> players = PlayerHelper.getExistPlayerTypes();
-                    ArrayList<Integer> renders = new ArrayList<>();
-                    for(int p = 0; p<players.size(); p++) {
-                        renders.add(p);
-                        if (players.get(p) == playerType) {
-                            defaultPos = p;
-                        }
-                    }
-                    SelectDialog<Integer> dialog = new SelectDialog<>(mActivity);
-                    dialog.setTip("请选择播放器");
-                    dialog.setAdapter(new SelectDialogAdapter.SelectDialogInterface<Integer>() {
-                        @Override
-                        public void click(Integer value, int pos) {
-                            try {
-                                dialog.cancel();
-                                int thisPlayType = players.get(pos);
-                                if (thisPlayType != playerType) {
-                                    mPlayerConfig.put("pl", thisPlayType);
-                                    updatePlayerCfgView();
-                                    listener.updatePlayerCfg();
-                                    listener.replay(false);
-                                    listener.setAllowSwitchPlayer(false);
-                                    hideBottom();
-                                }
-                            } catch (Exception e) {
-                                e.printStackTrace();
-                            }
-                        }
-
-                        @Override
-                        public String getDisplay(Integer val) {
-                            Integer playerType = players.get(val);
-                            return PlayerHelper.getPlayerName(playerType);
-                        }
-                    }, new DiffUtil.ItemCallback<Integer>() {
-                        @Override
-                        public boolean areItemsTheSame(@NonNull @NotNull Integer oldItem, @NonNull @NotNull Integer newItem) {
-                            return oldItem.intValue() == newItem.intValue();
-                        }
-
-                        @Override
-                        public boolean areContentsTheSame(@NonNull @NotNull Integer oldItem, @NonNull @NotNull Integer newItem) {
-                            return oldItem.intValue() == newItem.intValue();
-                        }
-                    }, renders, defaultPos);
-                    dialog.show();
-                } catch (JSONException e) {
-                    e.printStackTrace();
-                }
+                showPlayerSelectDialog();
                 return true;
             }
         });
+
         mPlayerIJKBtn.setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -974,6 +947,109 @@ public class VodController extends BaseController {
         mNextBtn.setNextFocusLeftId(R.id.screen_display);
     }
 
+    private void showPlayerSelectDialog() {
+        try {
+            int playerType = mPlayerConfig.getInt("pl");
+            int defaultPos = 0;
+            ArrayList<Integer> players = PlayerHelper.getExistPlayerTypes();
+            // 在末尾追加“其他播放器”选项
+            players.add(PLAYER_TYPE_EXTERNAL);
+
+            ArrayList<Integer> renders = new ArrayList<>();
+            for (int p = 0; p < players.size(); p++) {
+                renders.add(p);
+                if (players.get(p) == playerType) {
+                    defaultPos = p;
+                }
+            }
+            SelectDialog<Integer> dialog = new SelectDialog<>(mActivity);
+            dialog.setTip("请选择播放器");
+            dialog.setAdapter(new SelectDialogAdapter.SelectDialogInterface<Integer>() {
+                @Override
+                public void click(Integer value, int pos) {
+                    try {
+                        dialog.cancel();
+                        int thisPlayType = players.get(pos);
+                        if (thisPlayType == PLAYER_TYPE_EXTERNAL) {
+                            if (listener != null) {
+                                listener.startExternalPlayer();
+                            }
+                            hideBottom();
+                            return;
+                        }
+                        if (thisPlayType != playerType) {
+                            mPlayerConfig.put("pl", thisPlayType);
+                            updatePlayerCfgView();
+                            listener.updatePlayerCfg();
+                            listener.replay(false);
+                            listener.setAllowSwitchPlayer(false);
+                            hideBottom();
+                        }
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+
+                @Override
+                public String getDisplay(Integer val) {
+                    Integer pType = players.get(val);
+                    if (pType == PLAYER_TYPE_EXTERNAL) {
+                        return "其他播放器";
+                    }
+                    return PlayerHelper.getPlayerName(pType);
+                }
+            }, new DiffUtil.ItemCallback<Integer>() {
+                @Override
+                public boolean areItemsTheSame(@NonNull @NotNull Integer oldItem, @NonNull @NotNull Integer newItem) {
+                    return oldItem.intValue() == newItem.intValue();
+                }
+
+                @Override
+                public boolean areContentsTheSame(@NonNull @NotNull Integer oldItem, @NonNull @NotNull Integer newItem) {
+                    return oldItem.intValue() == newItem.intValue();
+                }
+            }, renders, defaultPos);
+            dialog.show();
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public float getCurrentZoom() {
+        return currentZoom;
+    }
+
+    public void applyCurrentZoom() {
+        updateZoomUi();
+        if (listener != null) {
+            listener.onVideoZoomChange(currentZoom);
+        }
+    }
+
+    private void changeZoom(float delta) {
+        if (delta == 0.0f) {
+            currentZoom = 1.0f;
+        } else {
+            currentZoom = Math.round((currentZoom + delta) * 100f) / 100f;
+            if (currentZoom < 0.5f) currentZoom = 0.5f;
+            if (currentZoom > 3.0f) currentZoom = 3.0f;
+        }
+        updateZoomUi();
+        if (listener != null) {
+            listener.onVideoZoomChange(currentZoom);
+        }
+    }
+
+    private void updateZoomUi() {
+        if (mPlayZoomResetBtn != null) {
+            if (currentZoom == 1.0f) {
+                mPlayZoomResetBtn.setText("重置");
+            } else {
+                mPlayZoomResetBtn.setText(String.format(Locale.US, "%.0f%%", currentZoom * 100));
+            }
+        }
+    }
+
     private void showScaleDialog() {
         try {
             int scaleType = mPlayerConfig.getInt("sc");
@@ -1107,6 +1183,9 @@ public class VodController extends BaseController {
             mPlayLabel.setVisibility(GONE);
             mPlayrefresh.setVisibility(GONE);
             mPlayerScaleBtn.setVisibility(GONE);
+            if (mPlayZoomInBtn != null) mPlayZoomInBtn.setVisibility(GONE);
+            if (mPlayZoomResetBtn != null) mPlayZoomResetBtn.setVisibility(GONE);
+            if (mPlayZoomOutBtn != null) mPlayZoomOutBtn.setVisibility(GONE);
             mPlayerIJKBtn.setVisibility(GONE);
             mPlayerTimeStartEndText.setVisibility(GONE);
             mPlayerTimeStartBtn.setVisibility(GONE);
@@ -1125,6 +1204,9 @@ public class VodController extends BaseController {
         mParseRoot.setVisibility(showParse ? VISIBLE : GONE);
         mPlayrefresh.setVisibility(VISIBLE);
         mPlayerScaleBtn.setVisibility(VISIBLE);
+        if (mPlayZoomInBtn != null) mPlayZoomInBtn.setVisibility(VISIBLE);
+        if (mPlayZoomResetBtn != null) mPlayZoomResetBtn.setVisibility(VISIBLE);
+        if (mPlayZoomOutBtn != null) mPlayZoomOutBtn.setVisibility(VISIBLE);
         mPlayerTimeStartEndText.setVisibility(GONE);
         mPlayerTimeStartBtn.setVisibility(VISIBLE);
         mPlayerTimeSkipBtn.setVisibility(VISIBLE);
@@ -1300,6 +1382,10 @@ public class VodController extends BaseController {
         void clickCast();
 
         void setAllowSwitchPlayer(boolean isAllow);
+
+        void onVideoZoomChange(float zoom);
+
+        void startExternalPlayer();
     }
 
     public void setListener(VodControlListener listener) {
