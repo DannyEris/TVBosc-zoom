@@ -179,27 +179,32 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     }
 
     private void checkFfmpegExtensionStatus() {
-        try {
-            Class<?> ffmpegLibClass = Class.forName("com.google.android.exoplayer2.ext.ffmpeg.FfmpegLibrary");
-            Method isAvailableMethod = ffmpegLibClass.getMethod("isAvailable");
-            boolean isAvailable = (Boolean) isAvailableMethod.invoke(null);
-            String info = "[自检] FfmpegLibrary.isAvailable = " + isAvailable;
-            if (isAvailable) {
-                try {
-                    Method getVersionMethod = ffmpegLibClass.getMethod("getVersion");
-                    info += " (FFmpeg 版本: " + getVersionMethod.invoke(null) + ")";
-                } catch (Throwable ignored) {
-                }
-            }
-            writeDebugLog(mAppContext, info);
-            if (!isAvailable) {
-                showToast("警告: FFmpeg 软解扩展加载失败 (isAvailable=false)");
-            }
-        } catch (Throwable e) {
-            writeDebugLog(mAppContext, "[自检异常] 无法加载 FfmpegLibrary: " + e.getMessage());
-            showToast("错误: 未找到 FFmpeg 扩展组件类");
-        }
+    // 先直接显式加载，如果缺依赖会在这里抛出明确的 dlopen 原因
+    try {
+        System.loadLibrary("ffmpegJNI");
+        writeDebugLog(mAppContext, "[原生加载] System.loadLibrary(\"ffmpegJNI\") 成功！");
+    } catch (Throwable t) {
+        writeDebugLog(mAppContext, "[原生加载失败] dlopen 报错详情: " + t.getMessage());
+        Log.e(TAG, "Native loadLibrary failed", t);
     }
+
+    try {
+        Class<?> ffmpegLibClass = Class.forName("com.google.android.exoplayer2.ext.ffmpeg.FfmpegLibrary");
+        Method isAvailableMethod = ffmpegLibClass.getMethod("isAvailable");
+        boolean isAvailable = (Boolean) isAvailableMethod.invoke(null);
+        String info = "[自检] FfmpegLibrary.isAvailable = " + isAvailable;
+        if (isAvailable) {
+            try {
+                Method getVersionMethod = ffmpegLibClass.getMethod("getVersion");
+                info += " (FFmpeg 版本: " + getVersionMethod.invoke(null) + ")";
+            } catch (Throwable ignored) {
+            }
+        }
+        writeDebugLog(mAppContext, info);
+    } catch (Throwable e) {
+        writeDebugLog(mAppContext, "[自检异常] 无法调用 FfmpegLibrary: " + e.getMessage());
+    }
+}
 
     public void setTrackSelector(TrackSelector trackSelector) {
         mTrackSelector = trackSelector;
