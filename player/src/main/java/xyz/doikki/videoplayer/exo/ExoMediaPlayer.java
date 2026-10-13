@@ -70,11 +70,26 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     .setBackBuffer(0, false)
                     .build();
         }
+
+        // 配置 TrackSelector，突破 Android 5.1 对 4K/10-bit 的虚标限制
+        if (mTrackSelector == null) {
+            DefaultTrackSelector defaultTrackSelector = new DefaultTrackSelector(mAppContext);
+            defaultTrackSelector.setParameters(
+                    defaultTrackSelector.buildUponParameters()
+                            .setExceedRendererCapabilitiesIfNecessary(true) // 允许超出能力上限时强制选择硬解轨道
+                            .setExceedVideoConstraintsIfNecessary(true)
+                            .setAllowVideoMixedMimeTypeAdaptiveness(true)
+                            .setAllowVideoNonSeamlessAdaptiveness(true)
+            );
+            mTrackSelector = defaultTrackSelector;
+        }
+
         mInternalPlayer = new SimpleExoPlayer.Builder(
                 mAppContext,
-                mRenderersFactory == null ? mRenderersFactory = new DefaultRenderersFactory(mAppContext).setEnableDecoderFallback(true)  // 启用解码器回退，避免硬件加速问题
+                mRenderersFactory == null ? mRenderersFactory = new DefaultRenderersFactory(mAppContext)
+                        .setEnableDecoderFallback(true) // 启用解码器降级回退
                         .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER) : mRenderersFactory,
-                mTrackSelector == null ? mTrackSelector = new DefaultTrackSelector(mAppContext) : mTrackSelector,
+                mTrackSelector,
                 new DefaultMediaSourceFactory(mAppContext),
                 mLoadControl,
                 DefaultBandwidthMeter.getSingletonInstance(mAppContext),
@@ -82,11 +97,12 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 .build();
         setOptions();
 
-        // 播放器日志（当开启日志且 mTrackSelector 为 MappingTrackSelector 时）
         if (VideoViewManager.getConfig().mIsEnableLog && mTrackSelector instanceof MappingTrackSelector) {
             mInternalPlayer.addAnalyticsListener(new EventLogger((MappingTrackSelector) mTrackSelector, "ExoPlayer"));
         }
-        if(trackSelector == null)trackSelector=(DefaultTrackSelector)mTrackSelector;
+        if (trackSelector == null && mTrackSelector instanceof DefaultTrackSelector) {
+            trackSelector = (DefaultTrackSelector) mTrackSelector;
+        }
         mInternalPlayer.addListener(this);
     }
 
@@ -113,7 +129,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void setDataSource(AssetFileDescriptor fd) {
-        // 不支持AssetFileDescriptor方式
     }
 
     @Override
@@ -248,7 +263,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void setOptions() {
-        //准备好就开始播放
         mInternalPlayer.setPlayWhenReady(true);
     }
 
