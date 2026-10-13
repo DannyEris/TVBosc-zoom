@@ -25,6 +25,7 @@ import com.google.android.exoplayer2.Player;
 import com.google.android.exoplayer2.RenderersFactory;
 import com.google.android.exoplayer2.SimpleExoPlayer;
 import com.google.android.exoplayer2.analytics.DefaultAnalyticsCollector;
+import com.google.android.exoplayer2.audio.AudioCapabilities;
 import com.google.android.exoplayer2.audio.AudioProcessor;
 import com.google.android.exoplayer2.audio.AudioProcessor.AudioFormat;
 import com.google.android.exoplayer2.audio.AudioProcessor.UnhandledAudioFormatException;
@@ -113,7 +114,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void initPlayer() {
-        // 1. 深度自检 FFmpeg 扩展库与 JNI 状态
         checkFfmpegExtensionStatus();
 
         if (mLoadControl == null) {
@@ -147,8 +147,13 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         boolean enableFloatOutput,
                         boolean enableAudioTrackPlaybackParams,
                         boolean enableOffload) {
+                    
+                    // 关键修复：显式锁定仅接收 PCM 16-bit，彻底关闭硬件伪透传，强制触发 FFmpeg 软解
+                    AudioCapabilities pcmOnlyCapabilities = new AudioCapabilities(new int[]{C.ENCODING_PCM_16BIT}, 8);
+
                     return new DefaultAudioSink.Builder(context)
-                            .setEnableFloatOutput(false)
+                            .setAudioCapabilities(pcmOnlyCapabilities) // 彻底杜绝透传，强制解码为 PCM
+                            .setEnableFloatOutput(false)               // 锁死 16-bit 整型 PCM
                             .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
                             .setAudioProcessors(new AudioProcessor[]{new AdaptiveDownmixAudioProcessor(context)})
                             .build();
@@ -179,32 +184,38 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     }
 
     private void checkFfmpegExtensionStatus() {
-    // 先直接显式加载，如果缺依赖会在这里抛出明确的 dlopen 原因
-    try {
-        System.loadLibrary("ffmpegJNI");
-        writeDebugLog(mAppContext, "[原生加载] System.loadLibrary(\"ffmpegJNI\") 成功！");
-    } catch (Throwable t) {
-        writeDebugLog(mAppContext, "[原生加载失败] dlopen 报错详情: " + t.getMessage());
-        Log.e(TAG, "Native loadLibrary failed", t);
-    }
-
-    try {
-        Class<?> ffmpegLibClass = Class.forName("com.google.android.exoplayer2.ext.ffmpeg.FfmpegLibrary");
-        Method isAvailableMethod = ffmpegLibClass.getMethod("isAvailable");
-        boolean isAvailable = (Boolean) isAvailableMethod.invoke(null);
-        String info = "[自检] FfmpegLibrary.isAvailable = " + isAvailable;
-        if (isAvailable) {
-            try {
-                Method getVersionMethod = ffmpegLibClass.getMethod("getVersion");
-                info += " (FFmpeg 版本: " + getVersionMethod.invoke(null) + ")";
-            } catch (Throwable ignored) {
-            }
+        try {
+            System.loadLibrary("ffmpegJNI");
+            writeDebugLog(mAppContext, "[原生加载] System.loadLibrary(\"ffmpegJNI\") 成功！");
+        } catch (Throwable t) {
+            writeDebugLog(mAppContext, "[原生加载失败] dlopen 报错详情: " + t.getMessage());
+            Log.e(TAG, "Native loadLibrary failed", t);
         }
-        writeDebugLog(mAppContext, info);
-    } catch (Throwable e) {
-        writeDebugLog(mAppContext, "[自检异常] 无法调用 FfmpegLibrary: " + e.getMessage());
+
+        try {
+            Class<?> ffmpegLibClass = Class.forName("com.google.android.exoplayer2.ext.ffmpeg.FfmpegLibrary");
+            Method isAvailableMethod = ffmpegLibClass.getMethod("isAvailable");
+            boolean isAvailable = (Boolean) isAvailableMethod.invoke(null);
+            String info = "[自检] FfmpegLibrary.isAvailable = " + isAvailable;
+            if (isAvailable) {
+                try {
+                    Method getVersionMethod = ffmpegLibClass.getMethod("getVersion");
+                    info += " (FFmpeg 版本: " + getVersionMethod.invoke(null) + ")";
+                } catch (Throwable ignored) {
+                }
+                try {
+                    Method supportsFormatMethod = ffmpegLibClass.getMethod("supportsFormat", String.class);
+                    boolean supEac3 = (Boolean) supportsFormatMethod.invoke(null, "audio/eac3");
+                    boolean supDts = (Boolean) supportsFormatMethod.invoke(null, "audio/vnd.dts");
+                    info += " | 格式支持: EAC3=" + supEac3 + ", DTS=" + supDts;
+                } catch (Throwable ignored) {
+                }
+            }
+            writeDebugLog(mAppContext, info);
+        } catch (Throwable e) {
+            writeDebugLog(mAppContext, "[自检异常] 无法调用 FfmpegLibrary: " + e.getMessage());
+        }
     }
-}
 
     public void setTrackSelector(TrackSelector trackSelector) {
         mTrackSelector = trackSelector;
@@ -397,13 +408,12 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
         writeDebugLog(mAppContext, "[播放报错] " + errDetail);
 
-        // 如果是音频解码器或 AudioTrack 失败引发的错误
         if (error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED) {
 
-            showToast("音频解码崩溃: " + (cause != null ? cause.getMessage() : error.getErrorCodeName()) + " -> 正在回退音轨");
+            showToast("音频解码异常: " + (cause != null ? cause.getMessage() : error.getErrorCodeName()) + " -> 正在回退音轨");
 
             if (trackSelector != null && mInternalPlayer != null) {
                 writeDebugLog(mAppContext, "[容灾生效] 重置音轨到默认");
