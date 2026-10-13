@@ -3,6 +3,7 @@ package xyz.doikki.videoplayer.exo;
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.net.Uri;
+import android.os.Build;
 import android.text.TextUtils;
 
 import com.google.android.exoplayer2.C;
@@ -21,23 +22,32 @@ import com.google.android.exoplayer2.upstream.cache.LeastRecentlyUsedCacheEvicto
 import com.google.android.exoplayer2.upstream.cache.SimpleCache;
 
 import java.io.File;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.Socket;
+import java.net.UnknownHostException;
 import java.security.SecureRandom;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
+import okhttp3.ConnectionSpec;
 import okhttp3.OkHttpClient;
 import okhttp3.Protocol;
+import okhttp3.TlsVersion;
 
 public final class ExoMediaSourceHelper {
     public static final String HEADER_FORMAT = "TVBox-Format";
@@ -109,7 +119,7 @@ public final class ExoMediaSourceHelper {
                 return new DashMediaSource.Factory(factory).createMediaSource(MediaItem.fromUri(contentUri));
             case C.TYPE_HLS:
                 return new HlsMediaSource.Factory(factory)
-                        .setLoadErrorHandlingPolicy(new HlsErrorHandlingPolicy())  // 设置自定义错误处理策略，跳过坏的切片
+                        .setLoadErrorHandlingPolicy(new HlsErrorHandlingPolicy())
                         .createMediaSource(MediaItem.fromUri(contentUri));
             default:
             case C.TYPE_OTHER:
@@ -195,33 +205,23 @@ public final class ExoMediaSourceHelper {
 
     private Cache newCache() {
         return new SimpleCache(
-                new File(externalCacheDir(), "exo-video-cache"),//缓存目录
-                new LeastRecentlyUsedCacheEvictor(512 * 1024 * 1024),//缓存大小，默认512M，使用LRU算法实现
+                new File(externalCacheDir(), "exo-video-cache"),
+                new LeastRecentlyUsedCacheEvictor(512 * 1024 * 1024),
                 new ExoDatabaseProvider(mAppContext));
     }
 
-    private File externalCacheDir()
-    {
+    private File externalCacheDir() {
         File externalCacheDir = mAppContext.getExternalCacheDir();
-        if (externalCacheDir == null){
+        if (externalCacheDir == null) {
             externalCacheDir = mAppContext.getCacheDir();
         }
         return externalCacheDir;
     }
 
-    /**
-     * Returns a new DataSource factory.
-     */
     private DataSource.Factory getDataSourceFactory() {
         return new com.google.android.exoplayer2.upstream.DefaultDataSourceFactory(mAppContext, getHttpDataSourceFactory());
     }
 
-    /**
-     * 为 ExoPlayer 构建高兼容的 OkHttp 客户端：
-     * 1. 忽略老系统无效的 SSL/TLS 证书拦截，彻底解决网盘 HTTPS 握手失败
-     * 2. 限制为 HTTP/1.1，杜绝网盘 CDN 在 HTTP/2 协议下 Range 断流的问题
-     * 3. 延长超时到 30 秒，开启连接失败自动重试与全协议重定向
-     */
     private OkHttpDataSource.Factory getHttpDataSourceFactory() {
         if (mHttpDataSourceFactory == null) {
             OkHttpClient client = mClient;
@@ -233,7 +233,7 @@ public final class ExoMediaSourceHelper {
                         .retryOnConnectionFailure(true)
                         .followRedirects(true)
                         .followSslRedirects(true)
-                        .protocols(Collections.singletonList(Protocol.HTTP_1_1)); // 强制 HTTP/1.1 避免网盘 CDN HTTP/2 报错
+                        .protocols(Collections.singletonList(Protocol.HTTP_1_1));
 
                 try {
                     final TrustManager[] trustAllCerts = new TrustManager[]{
@@ -259,12 +259,25 @@ public final class ExoMediaSourceHelper {
                     sslContext.init(null, trustAllCerts, new SecureRandom());
                     SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
 
+                    // 针对 Android 5.0 / 5.1 (API <= 22) 强制启用 TLS 1.2
+                    if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.LOLLIPOP_MR1) {
+                        sslSocketFactory = new Tls12SocketFactory(sslSocketFactory);
+                        ConnectionSpec cs = new ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
+                                .tlsVersions(TlsVersion.TLS_1_2, TlsVersion.TLS_1_1, TlsVersion.TLS_1_0)
+                                .build();
+                        List<ConnectionSpec> specs = new ArrayList<>();
+                        specs.add(cs);
+                        specs.add(ConnectionSpec.COMPATIBLE_TLS);
+                        specs.add(ConnectionSpec.CLEARTEXT);
+                        builder.connectionSpecs(specs);
+                    }
+
                     builder.sslSocketFactory(sslSocketFactory, (X509TrustManager) trustAllCerts[0]);
                     builder.hostnameVerifier(new HostnameVerifier() {
                         @SuppressLint("BadHostnameVerifier")
                         @Override
                         public boolean verify(String hostname, SSLSession session) {
-                            return true; // 信任任意域名证书
+                            return true;
                         }
                     });
                 } catch (Exception e) {
@@ -298,12 +311,65 @@ public final class ExoMediaSourceHelper {
                 }
             }
         }
-        getHttpDataSourceFactory(); // 确保工厂已初始化
+        getHttpDataSourceFactory();
         mHttpDataSourceFactory.setUserAgent(userAgent);
         mHttpDataSourceFactory.setDefaultRequestProperties(requestHeaders);
     }
 
     public void setCache(Cache cache) {
         this.mCache = cache;
+    }
+
+    /**
+     * 解决 Android 4.4~5.1 系统默认未激活 TLS 1.2 的兼容 Socket 工厂
+     */
+    private static class Tls12SocketFactory extends SSLSocketFactory {
+        private final SSLSocketFactory delegate;
+
+        public Tls12SocketFactory(SSLSocketFactory base) {
+            this.delegate = base;
+        }
+
+        @Override
+        public String[] getDefaultCipherSuites() {
+            return delegate.getDefaultCipherSuites();
+        }
+
+        @Override
+        public String[] getSupportedCipherSuites() {
+            return delegate.getSupportedCipherSuites();
+        }
+
+        private Socket patch(Socket s) {
+            if (s instanceof SSLSocket) {
+                ((SSLSocket) s).setEnabledProtocols(new String[]{"TLSv1.2", "TLSv1.1", "TLSv1"});
+            }
+            return s;
+        }
+
+        @Override
+        public Socket createSocket(Socket s, String host, int port, boolean autoClose) throws IOException {
+            return patch(delegate.createSocket(s, host, port, autoClose));
+        }
+
+        @Override
+        public Socket createSocket(String host, int port) throws IOException, UnknownHostException {
+            return patch(delegate.createSocket(host, port));
+        }
+
+        @Override
+        public Socket createSocket(String host, int port, InetAddress localHost, int localPort) throws IOException, UnknownHostException {
+            return patch(delegate.createSocket(host, port, localHost, localPort));
+        }
+
+        @Override
+        public Socket createSocket(InetAddress host, int port) throws IOException {
+            return patch(delegate.createSocket(host, port));
+        }
+
+        @Override
+        public Socket createSocket(InetAddress address, int port, InetAddress localAddress, int localPort) throws IOException {
+            return patch(delegate.createSocket(address, port, localAddress, localPort));
+        }
     }
 }
