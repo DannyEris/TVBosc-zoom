@@ -1,0 +1,121 @@
+name: Build TVBox APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: '编译类型 (Build Type)'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - 'release'
+          - 'debug'
+      arch:
+        description: 'CPU 架构版本 (Architecture)'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - 'all'
+          - 'universal'
+          - 'arm32'
+          - 'arm64'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '11'
+          cache: 'gradle'
+
+      - name: Set up Python 3.8
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.8'
+
+      - name: Generate local.properties
+        run: |
+          SDK_PATH="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          echo "sdk.dir=$SDK_PATH" > local.properties
+          echo "Generated local.properties content:"
+          cat local.properties
+
+      - name: Grant Execute Permission for Gradlew
+        run: chmod +x gradlew
+
+      - name: Determine Gradle Task
+        id: gradle_task
+        run: |
+          TYPE="${{ github.event.inputs.build_type }}"
+          ARCH="${{ github.event.inputs.arch }}"
+          
+          TYPE_CAP="$(tr '[:lower:]' '[:upper:]' <<< ${TYPE:0:1})${TYPE:1}"
+          
+          if [ "$ARCH" = "universal" ]; then
+            TASK="assemblePython${TYPE_CAP}"
+          elif [ "$ARCH" = "arm32" ]; then
+            TASK="assemblePython32${TYPE_CAP}"
+          elif [ "$ARCH" = "arm64" ]; then
+            TASK="assemblePython64${TYPE_CAP}"
+          else
+            TASK="assemble${TYPE_CAP}"
+          fi
+          
+          echo "Selected Gradle Task: $TASK"
+          echo "task=$TASK" >> $GITHUB_OUTPUT
+
+      - name: Build APK with Gradle
+        run: ./gradlew ${{ steps.gradle_task.outputs.task }} --stacktrace
+
+      - name: Sign and Align APKs
+        run: |
+          # 1. 动态生成独立发布签名文件
+          keytool -genkey -v -keystore tvbox.jks -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias tvbox -keypass 123456 -storepass 123456 \
+            -dname "CN=TVBox, OU=TVBox, O=TVBox, L=SH, ST=SH, C=CN"
+
+          # 2. 定位云端 Build Tools
+          BUILD_TOOLS_DIR=$(ls -d $ANDROID_SDK_ROOT/build-tools/* | sort -V | tail -n 1)
+          echo "Using Build Tools from: $BUILD_TOOLS_DIR"
+
+          # 3. 对所有输出的 APK 进行对齐与签名
+          find app/build/outputs/apk -name "*.apk" | while read -r apk; do
+            echo "----------------------------------------"
+            echo "Processing APK: $apk"
+            
+            aligned_apk="${apk%.apk}-aligned.apk"
+            signed_apk="${apk%.apk}-signed.apk"
+            
+            # 对齐优化
+            "$BUILD_TOOLS_DIR/zipalign" -f -p 4 "$apk" "$aligned_apk" 2>/dev/null || cp "$apk" "$aligned_apk"
+            
+            # 使用 apksigner 进行 V1 + V2 + V3 签名
+            "$BUILD_TOOLS_DIR/apksigner" sign --ks tvbox.jks --ks-pass pass:123456 --key-pass pass:123456 --ks-key-alias tvbox --out "$signed_apk" "$aligned_apk"
+            rm -f "$aligned_apk"
+            
+            # 去除文件名中的 -unsigned 标识并覆盖目标
+            final_apk="${apk/-unsigned/}"
+            mv -f "$signed_apk" "$final_apk"
+            if [ "$final_apk" != "$apk" ]; then
+              rm -f "$apk"
+            fi
+            
+            # 校验签名状态
+            echo "Verifying signature for $final_apk:"
+            "$BUILD_TOOLS_DIR/apksigner" verify -v "$final_apk"
+          done
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: TVBox-APKs-${{ github.event.inputs.arch }}-${{ github.event.inputs.build_type }}
+          path: app/build/outputs/apk/**/*.apk
