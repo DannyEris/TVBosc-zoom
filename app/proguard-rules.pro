@@ -249,5 +249,6 @@
 #-keep public class com.chaquo.python.** { *; }
 #-dontwarn com.chaquo.python.**
 
+# 保持 ExoPlayer FFmpeg 扩展组件类与构造方法不被混淆与裁剪
 -keep class com.google.android.exoplayer2.ext.ffmpeg.** { *; }
 -keep class * extends com.google.android.exoplayer2.audio.DecoderAudioRenderer { *; }
