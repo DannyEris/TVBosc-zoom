@@ -143,6 +143,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     }
 
     private void registerModeReceiver() {
+        if (mModeToggleReceiver != null) {
+            return;
+        }
         try {
             mModeToggleReceiver = new BroadcastReceiver() {
                 @Override
@@ -156,10 +159,12 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         showToast(tip);
                         writeDebugLog(context, "[热切换广播触发] " + tip);
 
-                        // 重新构建播放器以应用新的声道策略
+                        // 仅释放并重建底层播放器，不销毁广播监听器本身
                         if (mInternalPlayer != null && currentPlayPath != null) {
                             long pos = getCurrentPosition();
-                            release();
+                            mInternalPlayer.removeListener(ExoMediaPlayer.this);
+                            mInternalPlayer.release();
+                            mInternalPlayer = null;
                             initPlayer();
                             setDataSource(currentPlayPath, currentHeaders);
                             seekTo(pos);
@@ -175,6 +180,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void initPlayer() {
+        registerModeReceiver();
         checkFfmpegExtensionStatus();
 
         boolean multiChannel = isMultiChannelModeEnabled(mAppContext);
@@ -523,7 +529,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 showToast("声卡不支持多声道，已自动切换为电视立体声模式");
                 if (mInternalPlayer != null) {
                     long pos = getCurrentPosition();
-                    release();
+                    mInternalPlayer.removeListener(ExoMediaPlayer.this);
+                    mInternalPlayer.release();
+                    mInternalPlayer = null;
                     initPlayer();
                     setDataSource(currentPlayPath, currentHeaders);
                     seekTo(pos);
