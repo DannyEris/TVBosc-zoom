@@ -564,22 +564,13 @@ public class PlayFragment extends BaseLazyFragment {
 
                 int videoWidth = 0;
                 int videoHeight = 0;
-                if (mController != null && mController.getControlWrapper() != null) {
-                    int[] size = mController.getControlWrapper().getVideoSize();
-                    if (size != null && size.length >= 2) {
-                        videoWidth = size[0];
-                        videoHeight = size[1];
-                    }
-                }
-                if (videoWidth <= 0 || videoHeight <= 0) {
-                    int[] size = mVideoView.getVideoSize();
-                    if (size != null && size.length >= 2) {
-                        videoWidth = size[0];
-                        videoHeight = size[1];
-                    }
+                int[] size = mVideoView.getVideoSize();
+                if (size != null && size.length >= 2) {
+                    videoWidth = size[0];
+                    videoHeight = size[1];
                 }
 
-                // 底层硬件未上报视频尺寸时延迟重试
+                // 若底层渲染尚未就绪或尺寸未上报，延迟300ms重试
                 if (videoWidth <= 0 || videoHeight <= 0) {
                     mVideoView.postDelayed(new Runnable() {
                         @Override
@@ -606,11 +597,17 @@ public class PlayFragment extends BaseLazyFragment {
                     baseWidth = Math.round(containerHeight * videoRatio);
                 }
 
+                // 允许放大视图溢出父边界，保证居中扩展不被父容器剪切
+                if (renderView.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) renderView.getParent()).setClipChildren(false);
+                }
+                mVideoView.setClipChildren(false);
+
                 if (Math.abs(zoom - 1.0f) < 0.01f) {
-                    // 重置：恢复默认自适应并居中
+                    // 重置：恢复默认全屏自适应并居中
                     FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
                             Gravity.CENTER);
                     renderView.setLayoutParams(lp);
                 } else {
