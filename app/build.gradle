@@ -136,6 +136,9 @@ android {
 //        additionalParameters += '--set-max-idx-number=48000'
 //        additionalParameters += '--minimal-main-dex'
 //    }
+    packagingOptions {
+        pickFirst '**/libffmpegJNI.so'
+    }
 }
 
 repositories {
