@@ -201,7 +201,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
     }
 
-    // 优化的极速脱困看门狗哨兵
+    // 优化的无感避障看门狗哨兵
     private void initWatchdog() {
         mWatchdogHandler = new Handler(Looper.getMainLooper());
         mWatchdogRunnable = new Runnable() {
@@ -209,7 +209,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             public void run() {
                 if (mInternalPlayer != null && isPlaying()) {
                     long now = SystemClock.elapsedRealtime();
-                    // 门槛缩短至 1200ms：快速捕捉底层卡顿
+                    // 门槛 1200ms：快速捕捉底层卡顿
                     if (mLastRenderedFrameTimeRealtime > 0 
                             && (now - mLastRenderedFrameTimeRealtime > 1200) 
                             && getCurrentPosition() > 3000) {
@@ -225,9 +225,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             mLastRenderedFrameTimeRealtime = now + 800;
                             mInternalPlayer.seekTo(currentPos);
                         } else {
-                            // 第二顺位：原地未能恢复（遇到损坏 NAL 坏块），立即前跳 2 秒跨过阻碍
-                            long targetPos = (duration > 0) ? Math.min(currentPos + 2000, duration) : currentPos + 2000;
-                            writeDebugLog(mAppContext, "[自愈哨兵] 原地 Flush 后仍受阻(损坏帧)，自动【快进 2 秒】跨过坏块点！目标点: " + targetPos);
+                            // 第二顺位：步长升级至 4 秒！直接跨过当前损坏的 GOP 坏块区，杜绝反复倒带
+                            long targetPos = (duration > 0) ? Math.min(currentPos + 4000, duration) : currentPos + 4000;
+                            writeDebugLog(mAppContext, "[自愈哨兵] 原地 Flush 后仍受阻(损坏帧)，执行【跨 GOP 快进 4 秒】彻底跨过坏块！目标点: " + targetPos);
                             mStallRescueStep = 0;
                             mLastRenderedFrameTimeRealtime = now + 2500; // 跨过坏帧后给予 2.5 秒正常缓冲恢复期
                             mInternalPlayer.seekTo(targetPos);
@@ -342,14 +342,21 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         return mediaFormat;
                     }
 
-                    // 严禁丢弃已解码帧，守护参考帧队列完整性
+                    // 严禁丢弃未解码帧，守护参考帧队列完整性
                     @Override
                     protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
                         return false;
                     }
 
+                    // 核心观感优化：精准过滤 Seek 产生的历史倒带帧，彻底根除画面倒退回放！
                     @Override
                     protected boolean shouldDropOutputBuffer(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
+                        // 当帧落后超过 100ms（Seek 产生的历史帧落后常达 1~3 秒），果断丢弃不渲染！
+                        // 解码器依然会在后台解码以保持参考帧完整，但电视画面绝不倒退显示！
+                        if (earlyUs < -100_000) {
+                            return true;
+                        }
+                        // 100ms 以内的轻微网络与时钟抖动不丢弃，全力保障 60fps 满血丝滑度
                         return false;
                     }
 
@@ -470,7 +477,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
         if (path != null) {
-            // 收敛代理并发为 8 线程，平衡带宽吞吐与 CPU / 总线开销
+            // 收敛代理并发为 8 线程，全力保障 4K 高码率吞吐
             if (path.contains("thread=")) {
                 path = path.replaceAll("thread=\\d+", "thread=8");
                 writeDebugLog(mAppContext, "[并发优化] 锁定代理并发为 8 线程，全力保障 4K 高码率吞吐");
