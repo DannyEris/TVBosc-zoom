@@ -231,6 +231,36 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             trackSelector = (DefaultTrackSelector) mTrackSelector;
         }
         mInternalPlayer.addListener(this);
+        // === 注入 4K 卡顿与网速/硬解丢帧监控器 ===
+        mInternalPlayer.addAnalyticsListener(new com.google.android.exoplayer2.analytics.AnalyticsListener() {
+            @Override
+            public void onDroppedVideoFrames(EventTime eventTime, int droppedFrames, long elapsedMs) {
+                // 当芯片处理不过来导致画面被抛弃时触发
+                writeDebugLog(mAppContext, "[硬解丢帧告警] 掉帧: " + droppedFrames + " 帧, 耗时=" + elapsedMs + "ms");
+            }
+
+            @Override
+            public void onIsLoadingChanged(EventTime eventTime, boolean isLoading) {
+                long bufferedDuration = mInternalPlayer.getTotalBufferedDuration();
+                writeDebugLog(mAppContext, "[网络缓冲状态] isLoading=" + isLoading + ", 剩余缓冲时长=" + bufferedDuration + "ms");
+            }
+        });
+
+        // 启动定时器：每隔 2 秒记录一次核心状态心跳
+        final Handler monitorHandler = new Handler(Looper.getMainLooper());
+        monitorHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (mInternalPlayer != null && mInternalPlayer.isPlaying()) {
+                    long currentPos = mInternalPlayer.getCurrentPosition() / 1000;
+                    long bufferedDur = mInternalPlayer.getTotalBufferedDuration() / 1000;
+                    writeDebugLog(mAppContext, "[状态心跳] 播放进度=" + currentPos + "s | 剩余缓冲=" + bufferedDur + "s");
+                }
+                if (mInternalPlayer != null) {
+                    monitorHandler.postDelayed(this, 2000);
+                }
+            }
+        }, 2000);
     }
 
     private RenderersFactory createCustomRenderersFactory(final boolean enableMultiChannel) {
