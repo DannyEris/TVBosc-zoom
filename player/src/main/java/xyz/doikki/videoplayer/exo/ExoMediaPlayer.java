@@ -368,18 +368,12 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     }
 
     @Override
-    public void public void setDataSource(String path, Map<String, String> headers) {
+    public void setDataSource(String path, Map<String, String> headers) {
         // 规避 16 线程导致的 S912 内存总线拥堵与网盘限速断流
         if (path != null && path.contains("thread=16")) {
             path = path.replace("thread=16", "thread=6");
             writeDebugLog(mAppContext, "[并发优化] 检测到 16 线程请求，已自动优化为 6 线程以保护硬件总线");
         }
-        writeDebugLog(mAppContext, "setDataSource: " + path);
-        currentPlayPath = path;
-        currentHeaders = copyHeaders(headers);
-        mRetriedAsHls = false;
-        mMediaSource = mMediaSourceHelper.getMediaSource(path, copyHeaders(currentHeaders));
-    } {
         writeDebugLog(mAppContext, "setDataSource: " + path);
         currentPlayPath = path;
         currentHeaders = copyHeaders(headers);
