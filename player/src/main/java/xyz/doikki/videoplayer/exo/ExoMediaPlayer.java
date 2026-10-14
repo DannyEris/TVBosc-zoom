@@ -225,9 +225,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             mLastRenderedFrameTimeRealtime = now + 800;
                             mInternalPlayer.seekTo(currentPos);
                         } else {
-                            // 第二顺位：步长升级至 4 秒！直接跨过当前损坏的 GOP 坏块区，杜绝反复倒带
-                            long targetPos = (duration > 0) ? Math.min(currentPos + 4000, duration) : currentPos + 4000;
-                            writeDebugLog(mAppContext, "[自愈哨兵] 原地 Flush 后仍受阻(损坏帧)，执行【跨 GOP 快进 4 秒】彻底跨过坏块！目标点: " + targetPos);
+                            // 第二顺位：步长升级至 3.5 秒！直接跨过当前损坏的 GOP 坏块区，杜绝反复倒带
+                            long targetPos = (duration > 0) ? Math.min(currentPos + 3500, duration) : currentPos + 3500;
+                            writeDebugLog(mAppContext, "[自愈哨兵] 原地 Flush 后仍受阻(损坏帧)，执行【跨 GOP 快进 3.5 秒】彻底跨过坏块！目标点: " + targetPos);
                             mStallRescueStep = 0;
                             mLastRenderedFrameTimeRealtime = now + 2500; // 跨过坏帧后给予 2.5 秒正常缓冲恢复期
                             mInternalPlayer.seekTo(targetPos);
