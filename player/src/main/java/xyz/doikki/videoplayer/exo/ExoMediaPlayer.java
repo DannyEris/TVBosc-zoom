@@ -39,6 +39,7 @@ import com.google.android.exoplayer2.audio.AudioSink;
 import com.google.android.exoplayer2.audio.BaseAudioProcessor;
 import com.google.android.exoplayer2.audio.DefaultAudioSink;
 import com.google.android.exoplayer2.audio.MediaCodecAudioRenderer;
+import com.google.android.exoplayer2.mediacodec.MediaCodecAdapter;
 import com.google.android.exoplayer2.mediacodec.MediaCodecSelector;
 import com.google.android.exoplayer2.source.DefaultMediaSourceFactory;
 import com.google.android.exoplayer2.source.MediaSource;
@@ -94,6 +95,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     private boolean mRetriedAsHls;
 
     private BroadcastReceiver mModeToggleReceiver;
+    private static File sDebugLogFile = null;
 
     public static boolean isMultiChannelModeEnabled(Context context) {
         SharedPreferences sp = context.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
@@ -105,18 +107,20 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         sp.edit().putBoolean(KEY_MULTICHANNEL_MODE, enabled).apply();
     }
 
-    private static void writeDebugLog(Context context, String msg) {
+    // 彻底修复：使用缓存路径，严禁高频查询 getExternalFilesDir 导致 Vold Binder IPC 阻塞
+    private static synchronized void writeDebugLog(Context context, String msg) {
         Log.e(TAG, msg);
         try {
-            File logFile = new File(context.getExternalFilesDir(null), "exo_debug.log");
-            if (!logFile.exists()) {
+            if (sDebugLogFile == null) {
                 File sdLog = new File("/sdcard/exo_debug.log");
                 if (sdLog.canWrite() || !sdLog.exists()) {
-                    logFile = sdLog;
+                    sDebugLogFile = sdLog;
+                } else {
+                    sDebugLogFile = new File(context.getFilesDir(), "exo_debug.log");
                 }
             }
             String time = new SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
-            FileWriter writer = new FileWriter(logFile, true);
+            FileWriter writer = new FileWriter(sDebugLogFile, true);
             writer.write(time + " " + msg + "\n");
             writer.flush();
             writer.close();
@@ -185,11 +189,11 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         boolean multiChannel = isMultiChannelModeEnabled(mAppContext);
         writeDebugLog(mAppContext, "[initPlayer] 当前音频输出模式: " + (multiChannel ? "【功放模式 5.1 直通】" : "【电视模式 2.0 下混】"));
 
-        // 平滑缓冲区间：最小20s，最大50s，内存池64MB，彻底消除每300ms一次的网络频繁颠簸
+        // 核心修复：10s~30s 迟滞区间，内存上限设为 80MB，充满后可连续休眠 20 秒，消除高频网络震荡
         mLoadControl = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(20_000, 50_000, 2_000, 4_000)
-                .setTargetBufferBytes(64 * 1024 * 1024)
-                .setPrioritizeTimeOverSizeThresholds(true)
+                .setBufferDurationsMs(10_000, 30_000, 1_500, 3_000)
+                .setTargetBufferBytes(80 * 1024 * 1024)
+                .setPrioritizeTimeOverSizeThresholds(false)
                 .setBackBuffer(0, false)
                 .build();
 
@@ -227,19 +231,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
         mInternalPlayer.addListener(this);
 
-        mInternalPlayer.addAnalyticsListener(new com.google.android.exoplayer2.analytics.AnalyticsListener() {
-            @Override
-            public void onDroppedVideoFrames(EventTime eventTime, int droppedFrames, long elapsedMs) {
-                writeDebugLog(mAppContext, "[硬解丢帧告警] 掉帧: " + droppedFrames + " 帧, 耗时=" + elapsedMs + "ms");
-            }
-
-            @Override
-            public void onIsLoadingChanged(EventTime eventTime, boolean isLoading) {
-                long bufferedDuration = mInternalPlayer.getTotalBufferedDuration();
-                writeDebugLog(mAppContext, "[网络缓冲状态] isLoading=" + isLoading + ", 剩余缓冲时长=" + bufferedDuration + "ms");
-            }
-        });
-
         final Handler monitorHandler = new Handler(Looper.getMainLooper());
         monitorHandler.postDelayed(new Runnable() {
             @Override
@@ -269,7 +260,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     long allowedVideoJoiningTimeMs,
                     ArrayList<Renderer> out) {
 
-                writeDebugLog(context, "[buildVideoRenderers] 挂载 4K 晶晨原生 VSYNC 渲染器(扩充4MB输入缓冲)...");
+                writeDebugLog(context, "[buildVideoRenderers] 挂载晶晨 S912 专有零丢帧/低延迟硬解渲染器...");
 
                 MediaCodecVideoRenderer videoRenderer = new MediaCodecVideoRenderer(
                         context,
@@ -293,22 +284,38 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                                 format, codecMimeType, codecMaxValues, codecOperatingRate,
                                 deviceNeedsNoPostProcessWorkaround, tunnelingAudioSessionId);
 
-                        // 关键修复：显式设定 4MB 单帧输入缓冲区，防止 4K 60fps 大体积 I 帧截断导致驱动丢失同步
+                        // 1. 扩充单帧输入缓冲区，保证 4K 大 I 帧完整喂入
                         mediaFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4 * 1024 * 1024);
+                        // 2. 激活低延迟管线，缩短驱动队列深度，为 4K 释放更多物理 CMA 显存
+                        mediaFormat.setInteger("vdec-lowlatency", 1);
                         return mediaFormat;
                     }
 
                     @Override
                     protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 严禁跳跃丢弃到关键帧，保护晶晨 VPU 的 DPB 参考帧链条完整
+                        // 严禁跳帧，保护 DPB 参考链
                         return false;
                     }
-                    // 注意：不再重写 renderOutputBufferV21，恢复 ExoPlayer 官方 releaseOutputBuffer(index, releaseTimeNs)
-                    // 依靠 VSYNC 纳秒时间戳精准释放 buffer，避免驱动底层 BufferQueue 堆积死锁
+
+                    @Override
+                    protected boolean shouldDropOutputBuffer(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
+                        // 核心修复：严禁抛弃已硬解视频帧，防止破坏晶晨硬件参考链导致驱动死锁
+                        return false;
+                    }
+
+                    @Override
+                    protected void renderOutputBufferV21(
+                            MediaCodecAdapter codec,
+                            int index,
+                            long presentationTimeUs,
+                            long releaseTimeNs) {
+                        // 核心修复：强制立即送显，规避 Android 5.1 纳秒时间戳死锁，促使 SurfaceFlinger 尽早归还显存块
+                        renderOutputBuffer(codec, index, presentationTimeUs);
+                    }
                 };
 
                 out.add(videoRenderer);
-                writeDebugLog(context, "[buildVideoRenderers] 晶晨原生 VSYNC 渲染器装载成功！");
+                writeDebugLog(context, "[buildVideoRenderers] 定制零丢帧渲染器装载成功！");
             }
 
             @Override
@@ -411,7 +418,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
-        // 将高并发线程降为 3，减轻 Wi-Fi 芯片与本地代理的 CPU 抢占
         if (path != null) {
             if (path.contains("thread=16")) {
                 path = path.replace("thread=16", "thread=3");
