@@ -221,11 +221,11 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             // 第一顺位：尝试原地 Flush 解锁显存拥塞
                             writeDebugLog(mAppContext, "[自愈哨兵] 检测到视频硬件停滞，执行温和【原地 Flush】自愈！");
                             mStallRescueStep = 1;
-                            // 宽限期压缩至 800ms：快速验证是否能恢复出帧
-                            mLastRenderedFrameTimeRealtime = now + 800;
+                            // 将二次判定等待压缩至 600ms（若 600ms 内芯片未能恢复出帧，立即执行快进脱困）
+                            mLastRenderedFrameTimeRealtime = now - 600;
                             mInternalPlayer.seekTo(currentPos);
                         } else {
-                            // 第二顺位：步长升级至 3.5 秒！直接跨过当前损坏的 GOP 坏块区，杜绝反复倒带
+                            // 第二顺位：维持 3.5 秒固定步长，彻底跨过当前损坏的 GOP 坏块区
                             long targetPos = (duration > 0) ? Math.min(currentPos + 3500, duration) : currentPos + 3500;
                             writeDebugLog(mAppContext, "[自愈哨兵] 原地 Flush 后仍受阻(损坏帧)，执行【跨 GOP 快进 3.5 秒】彻底跨过坏块！目标点: " + targetPos);
                             mStallRescueStep = 0;
@@ -235,7 +235,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     }
                 }
                 if (mWatchdogHandler != null) {
-                    mWatchdogHandler.postDelayed(this, 400); // 400ms 高频巡检
+                    mWatchdogHandler.postDelayed(this, 300); // 300ms 高频巡检
                 }
             }
         };
@@ -356,7 +356,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         if (earlyUs < -100_000) {
                             return true;
                         }
-                        // 100ms 以内的轻微网络与时钟抖动不丢弃，全力保障 60fps 满血丝滑度
+                        // 100ms 以内的轻微抖动不丢弃，全力保障 60fps 满血丝滑度
                         return false;
                     }
 
@@ -477,7 +477,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
         if (path != null) {
-            // 收敛代理并发为 8 线程，全力保障 4K 高码率吞吐
+            // 锁定代理并发为 8 线程，全力保障 4K 高码率吞吐
             if (path.contains("thread=")) {
                 path = path.replaceAll("thread=\\d+", "thread=8");
                 writeDebugLog(mAppContext, "[并发优化] 锁定代理并发为 8 线程，全力保障 4K 高码率吞吐");
@@ -655,6 +655,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
         switch (playbackState) {
             case Player.STATE_BUFFERING:
+                // 保留中央贪食蛇/加载菊花圈
                 mPlayerEventListener.onInfo(MEDIA_INFO_BUFFERING_START, getBufferedPercentage());
                 break;
             case Player.STATE_READY:
