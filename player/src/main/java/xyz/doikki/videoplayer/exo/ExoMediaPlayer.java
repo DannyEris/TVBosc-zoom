@@ -254,7 +254,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
         // 4K 60fps 专属大水池配置：大幅提高后台预读水位，彻底消除断续卡顿感
         mLoadControl = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(20_000, 50_000, 2_500, 10_000)
+                .setBufferDurationsMs(20_000, 60_000, 2_500, 10_000)
                 .setTargetBufferBytes(128 * 1024 * 1024) // 显存缓冲扩容至 128MB
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .setBackBuffer(0, false)
@@ -470,10 +470,10 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
         if (path != null) {
-            // 收敛代理并发为 3 线程，平衡带宽吞吐与 CPU / 总线开销
+            // 收敛代理并发为 8 线程，平衡带宽吞吐与 CPU / 总线开销
             if (path.contains("thread=")) {
-                path = path.replaceAll("thread=\\d+", "thread=3");
-                writeDebugLog(mAppContext, "[并发优化] 已自动收敛代理并发为 3 线程以保护 CPU 与总线稳定");
+                path = path.replaceAll("thread=\\d+", "thread=8");
+                writeDebugLog(mAppContext, "[并发优化] 锁定代理并发为 8 线程，全力保障 4K 高码率吞吐");
             }
         }
         writeDebugLog(mAppContext, "setDataSource: " + path);
