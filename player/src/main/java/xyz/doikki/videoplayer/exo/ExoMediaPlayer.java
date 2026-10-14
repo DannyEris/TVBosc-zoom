@@ -39,7 +39,6 @@ import com.google.android.exoplayer2.audio.AudioSink;
 import com.google.android.exoplayer2.audio.BaseAudioProcessor;
 import com.google.android.exoplayer2.audio.DefaultAudioSink;
 import com.google.android.exoplayer2.audio.MediaCodecAudioRenderer;
-import com.google.android.exoplayer2.mediacodec.MediaCodecAdapter;
 import com.google.android.exoplayer2.mediacodec.MediaCodecSelector;
 import com.google.android.exoplayer2.source.DefaultMediaSourceFactory;
 import com.google.android.exoplayer2.source.MediaSource;
@@ -186,10 +185,10 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         boolean multiChannel = isMultiChannelModeEnabled(mAppContext);
         writeDebugLog(mAppContext, "[initPlayer] 当前音频输出模式: " + (multiChannel ? "【功放模式 5.1 直通】" : "【电视模式 2.0 下混】"));
 
-        // 优化缓冲配置：削减至 32MB / 最大 30s，防止突破 192MB 堆内存上限引发 GC 顿挫与代理超时
+        // 平滑缓冲区间：最小20s，最大50s，内存池64MB，彻底消除每300ms一次的网络频繁颠簸
         mLoadControl = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(15_000, 30_000, 1_500, 3_000)
-                .setTargetBufferBytes(32 * 1024 * 1024)
+                .setBufferDurationsMs(20_000, 50_000, 2_000, 4_000)
+                .setTargetBufferBytes(64 * 1024 * 1024)
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .setBackBuffer(0, false)
                 .build();
@@ -270,7 +269,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     long allowedVideoJoiningTimeMs,
                     ArrayList<Renderer> out) {
 
-                writeDebugLog(context, "[buildVideoRenderers] 挂载晶晨专用零丢帧渲染器(启用 freerun)...");
+                writeDebugLog(context, "[buildVideoRenderers] 挂载 4K 晶晨原生 VSYNC 渲染器(扩充4MB输入缓冲)...");
 
                 MediaCodecVideoRenderer videoRenderer = new MediaCodecVideoRenderer(
                         context,
@@ -294,37 +293,22 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                                 format, codecMimeType, codecMaxValues, codecOperatingRate,
                                 deviceNeedsNoPostProcessWorkaround, tunnelingAudioSessionId);
 
-                        // 仅激活晶晨驱动底层的 freerun 自由渲染流水线，避开 tsync 阻塞
-                        // 严禁在此处添加 max-dec-frame-buffering 参数！
-                        mediaFormat.setInteger("vdec-lowlatency", 1);
+                        // 关键修复：显式设定 4MB 单帧输入缓冲区，防止 4K 60fps 大体积 I 帧截断导致驱动丢失同步
+                        mediaFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4 * 1024 * 1024);
                         return mediaFormat;
                     }
 
                     @Override
                     protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 严禁跳帧到关键帧，确保硬解 DPB 参考链完整
+                        // 严禁跳跃丢弃到关键帧，保护晶晨 VPU 的 DPB 参考帧链条完整
                         return false;
                     }
-
-                    @Override
-                    protected boolean shouldDropOutputBuffer(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 严禁丢弃硬解缓冲，防止底层释放未完成参考帧导致看门狗崩溃
-                        return false;
-                    }
-
-                    @Override
-                    protected void renderOutputBufferV21(
-                            MediaCodecAdapter codec,
-                            int index,
-                            long presentationTimeUs,
-                            long releaseTimeNs) {
-                        // 规避 Android 5.1 纳秒时间戳死锁，强制立即送显
-                        renderOutputBuffer(codec, index, presentationTimeUs);
-                    }
+                    // 注意：不再重写 renderOutputBufferV21，恢复 ExoPlayer 官方 releaseOutputBuffer(index, releaseTimeNs)
+                    // 依靠 VSYNC 纳秒时间戳精准释放 buffer，避免驱动底层 BufferQueue 堆积死锁
                 };
 
                 out.add(videoRenderer);
-                writeDebugLog(context, "[buildVideoRenderers] 定制零丢帧渲染器装载成功！");
+                writeDebugLog(context, "[buildVideoRenderers] 晶晨原生 VSYNC 渲染器装载成功！");
             }
 
             @Override
@@ -427,9 +411,15 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
-        if (path != null && path.contains("thread=16")) {
-            path = path.replace("thread=16", "thread=6");
-            writeDebugLog(mAppContext, "[并发优化] 检测到 16 线程请求，已自动优化为 6 线程以保护硬件总线");
+        // 将高并发线程降为 3，减轻 Wi-Fi 芯片与本地代理的 CPU 抢占
+        if (path != null) {
+            if (path.contains("thread=16")) {
+                path = path.replace("thread=16", "thread=3");
+                writeDebugLog(mAppContext, "[并发优化] 检测到 16 线程请求，已自动优化为 3 线程以保护系统总线");
+            } else if (path.contains("thread=6")) {
+                path = path.replace("thread=6", "thread=3");
+                writeDebugLog(mAppContext, "[并发优化] 检测到 6 线程请求，已自动优化为 3 线程以保护系统总线");
+            }
         }
         writeDebugLog(mAppContext, "setDataSource: " + path);
         currentPlayPath = path;
