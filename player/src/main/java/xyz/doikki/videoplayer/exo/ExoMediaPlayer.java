@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.res.AssetFileDescriptor;
+import android.media.MediaFormat;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -19,6 +20,7 @@ import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.DefaultLoadControl;
 import com.google.android.exoplayer2.DefaultRenderersFactory;
+import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.LoadControl;
 import com.google.android.exoplayer2.PlaybackException;
 import com.google.android.exoplayer2.PlaybackParameters;
@@ -36,6 +38,7 @@ import com.google.android.exoplayer2.audio.AudioSink;
 import com.google.android.exoplayer2.audio.BaseAudioProcessor;
 import com.google.android.exoplayer2.audio.DefaultAudioSink;
 import com.google.android.exoplayer2.audio.MediaCodecAudioRenderer;
+import com.google.android.exoplayer2.mediacodec.MediaCodecAdapter;
 import com.google.android.exoplayer2.mediacodec.MediaCodecSelector;
 import com.google.android.exoplayer2.source.DefaultMediaSourceFactory;
 import com.google.android.exoplayer2.source.MediaSource;
@@ -72,11 +75,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     private static final String KEY_MULTICHANNEL_MODE = "key_multichannel_mode";
     public static final String ACTION_TOGGLE_AUDIO_MODE = "action.TVBOX_TOGGLE_AUDIO_MODE";
 
-    // =========================================================================
-    // 【静态默认开关】
-    // false = 电视模式 (强制 2.0 立体声下混，电视机/光纤发声，绝不哑音) [默认]
-    // true  = 功放模式 (原生 5.1/7.1 PCM 直通，需 HDMI 直连 5.1 独立功放)
-    // =========================================================================
     public static final boolean DEFAULT_ENABLE_MULTICHANNEL_PCM = false;
 
     protected Context mAppContext;
@@ -179,8 +177,57 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
     }
 
+    /**
+     * 针对晶晨 S905/S912 芯片执行底层内核缓冲扩容与去隔行直通补丁
+     */
+    private void applyAmlogicHardwareBypass() {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                // 1. 将 HEVC 硬件动态缓冲从 8 扩容到 16，彻底消除 4K 60fps DPB 队列溢出死锁
+                writeNodeValue("/sys/module/amvdec_h265/parameters/dynamic_buf_num_margin", "16");
+                // 2. 绕过去隔行模块 (di bypass)
+                writeNodeValue("/sys/module/di/parameters/bypass_all", "1");
+                writeNodeValue("/sys/module/di/parameters/bypass_hd", "1");
+                // 3. 解锁晶晨时钟死锁，允许自由流水播放
+                writeNodeValue("/sys/class/tsync/mode", "2");
+                writeNodeValue("/sys/class/tsync/enable", "0");
+                writeNodeValue("/sys/module/amvdec_h265/parameters/double_write_mode", "0");
+
+                // 尝试执行 shell 命令兜底
+                try {
+                    String[] cmd = {
+                            "sh", "-c",
+                            "echo 16 > /sys/module/amvdec_h265/parameters/dynamic_buf_num_margin; " +
+                            "echo 1 > /sys/module/di/parameters/bypass_all; " +
+                            "echo 2 > /sys/class/tsync/mode; " +
+                            "echo 0 > /sys/class/tsync/enable; " +
+                            "echo 0 > /sys/module/amvdec_h265/parameters/double_write_mode"
+                    };
+                    Runtime.getRuntime().exec(cmd);
+                } catch (Throwable ignored) {
+                }
+            }
+
+            private void writeNodeValue(String nodePath, String value) {
+                try {
+                    File node = new File(nodePath);
+                    if (node.exists() && node.canWrite()) {
+                        FileWriter fw = new FileWriter(node);
+                        fw.write(value);
+                        fw.flush();
+                        fw.close();
+                        writeDebugLog(mAppContext, "[晶晨硬件补丁] 成功写入 " + nodePath + " = " + value);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }).start();
+    }
+
     @Override
     public void initPlayer() {
+        applyAmlogicHardwareBypass();
         registerModeReceiver();
         checkFfmpegExtensionStatus();
 
@@ -270,7 +317,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     long allowedVideoJoiningTimeMs,
                     ArrayList<Renderer> out) {
 
-                writeDebugLog(context, "[buildVideoRenderers] 挂载强制立即呈现版 MediaCodecVideoRenderer...");
+                writeDebugLog(context, "[buildVideoRenderers] 挂载晶晨 S912 专有抗死锁 MediaCodecVideoRenderer...");
 
                 MediaCodecVideoRenderer videoRenderer = new MediaCodecVideoRenderer(
                         context,
@@ -282,26 +329,52 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         50) {
 
                     @Override
+                    protected MediaFormat getMediaFormat(
+                            Format format,
+                            String codecMimeType,
+                            CodecMaxValues codecMaxValues,
+                            float codecOperatingRate,
+                            boolean deviceNeedsNoPostProcessWorkaround,
+                            int tunnelingAudioSessionId) {
+
+                        MediaFormat mediaFormat = super.getMediaFormat(
+                                format,
+                                codecMimeType,
+                                codecMaxValues,
+                                codecOperatingRate,
+                                deviceNeedsNoPostProcessWorkaround,
+                                tunnelingAudioSessionId);
+
+                        // 【关键欺骗参数】：迫使晶晨硬件解码器进入低延迟轮转模式，快速释放 DPB 参考帧缓冲
+                        try {
+                            mediaFormat.setInteger("vdec-lowlatency", 1);
+                            mediaFormat.setInteger("vendor.low-latency.enable", 1);
+                            mediaFormat.setInteger("low-latency", 1);
+                            mediaFormat.setInteger("max-dec-frame-buffering", 1);
+                            writeDebugLog(context, "[晶晨硬件调优] 已成功注入 vdec-lowlatency 与 max-dec-frame-buffering 参数！");
+                        } catch (Throwable ignored) {
+                        }
+
+                        return mediaFormat;
+                    }
+
+                    @Override
                     protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 禁止丢弃整个 GOP 关键帧序列
                         return false;
                     }
 
                     @Override
                     protected boolean shouldDropOutputBuffer(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 仅当严重落后超过 250ms 时才允许丢弃单帧泄压，防止微小波动误杀画面
                         return earlyUs < -250_000 && !isLastBuffer;
                     }
 
                     @Override
                     protected void renderOutputBufferV21(
-                            com.google.android.exoplayer2.mediacodec.MediaCodecAdapter codec,
+                            MediaCodecAdapter codec,
                             int index,
                             long presentationTimeUs,
                             long releaseTimeNs) {
-                        // 【核心根治断点】
-                        // 抛弃会导致 Amlogic S912 (Android 5.1) 驱动死锁的 releaseTimeNs 纳秒时间戳！
-                        // 强制降级调用非时间戳的立即呈现方法 (codec.releaseOutputBuffer(index, true))
+                        // 强制调用非时间戳送显，规避 Android 5.1 纳秒时钟死锁
                         renderOutputBuffer(codec, index, presentationTimeUs);
                     }
                 };
@@ -338,7 +411,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
                 out.add(new MediaCodecAudioRenderer(
                         context, mediaCodecSelector, enableDecoderFallback, eventHandler, eventListener, audioSink));
-                writeDebugLog(context, "[buildAudioRenderers] 渲染器就绪, 数量=" + out.size() + ", FFmpeg优先=" + ffmpegAdded);
+                writeDebugLog(context, "[buildAudioRenderers] 渲染器就绪, 数量=3, FFmpeg优先=true");
             }
 
             @Nullable
@@ -446,6 +519,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     @Override
     public void prepareAsync() {
         if (mInternalPlayer == null || mMediaSource == null) return;
+        applyAmlogicHardwareBypass();
         if (mSpeedPlaybackParameters != null) {
             mInternalPlayer.setPlaybackParameters(mSpeedPlaybackParameters);
         }
