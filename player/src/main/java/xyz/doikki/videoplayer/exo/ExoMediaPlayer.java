@@ -98,9 +98,11 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     private BroadcastReceiver mModeToggleReceiver;
     private static File sDebugLogFile = null;
 
-    // 自愈哨兵状态与冷却锁
+    // 严谨自愈哨兵：见帧才拔刀，杜绝连环触发
     private volatile long mLastRenderedFrameTimeRealtime = 0;
+    private volatile boolean mHasRenderedFirstFrame = false;
     private volatile boolean mIsRecovering = false;
+    private long mLastRecoverTimeRealtime = 0;
     private Handler mWatchdogHandler;
     private Runnable mWatchdogRunnable;
 
@@ -188,33 +190,35 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
     }
 
-    // 借鉴 Kodi 机制并加入防误触冷却锁的自愈哨兵
     private void initWatchdog() {
         mWatchdogHandler = new Handler(Looper.getMainLooper());
         mWatchdogRunnable = new Runnable() {
             @Override
             public void run() {
-                if (mInternalPlayer != null && isPlaying()) {
+                if (mInternalPlayer != null) {
+                    int state = mInternalPlayer.getPlaybackState();
+                    boolean playWhenReady = mInternalPlayer.getPlayWhenReady();
                     long now = SystemClock.elapsedRealtime();
 
                     if (mIsRecovering) {
-                        // 处于脱困刷新状态中，3 秒内不重复判定，防止界面进度反复跳跃
-                        if (now - mLastRenderedFrameTimeRealtime > 3000) {
+                        // 处于自愈过渡期时给予最长 4 秒缓冲窗口，4 秒未渲染首帧强制开锁允许重试
+                        if (now - mLastRecoverTimeRealtime > 4000) {
                             mIsRecovering = false;
                         }
                     } else {
-                        // 正常播放时，若画面超过 1200ms 未吐出新帧且播放已正常起步，判定为显存耗尽挂起
-                        if (mLastRenderedFrameTimeRealtime > 0 
-                                && (now - mLastRenderedFrameTimeRealtime > 1200) 
-                                && getCurrentPosition() > 2500) {
-                            
-                            writeDebugLog(mAppContext, "[自愈哨兵] 检测到视频硬件帧停滞，触发精准 Flush 脱困！");
-                            mIsRecovering = true; // 上锁
-                            mLastRenderedFrameTimeRealtime = now;
-                            
-                            // 强制触发底层 OMX_CommandFlush 与 VPU 物理显存释放重置
-                            long currentPos = getCurrentPosition();
-                            mInternalPlayer.seekTo(currentPos);
+                        // 核心条件：仅在播放就绪、允许播放、且首帧已经上屏后才监测硬件停滞
+                        if (state == Player.STATE_READY && playWhenReady && mHasRenderedFirstFrame) {
+                            if (mLastRenderedFrameTimeRealtime > 0 && (now - mLastRenderedFrameTimeRealtime > 1800)) {
+                                writeDebugLog(mAppContext, "[自愈哨兵] 检测到视频硬件帧停滞超过 1.8 秒，触发精准 Flush 脱困！");
+                                
+                                mIsRecovering = true;
+                                mLastRecoverTimeRealtime = now;
+                                mHasRenderedFirstFrame = false;
+                                mLastRenderedFrameTimeRealtime = 0;
+
+                                long currentPos = getCurrentPosition();
+                                mInternalPlayer.seekTo(currentPos);
+                            }
                         }
                     }
                 }
@@ -233,17 +237,17 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         boolean multiChannel = isMultiChannelModeEnabled(mAppContext);
         writeDebugLog(mAppContext, "[initPlayer] 音频模式: " + (multiChannel ? "【功放 5.1/7.1 直通】" : "【电视 2.0 下混】"));
 
-        mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
+        mHasRenderedFirstFrame = false;
+        mLastRenderedFrameTimeRealtime = 0;
+        mIsRecovering = false;
 
-        // 借鉴原版保护结构 + 融合控温防断连的最佳 4K 缓冲配比
-        if (mLoadControl == null) {
-            mLoadControl = new DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(15_000, 35_000, 1_500, 3_000) // 1.5s 秒开，15s~35s 蓄水池
-                    .setTargetBufferBytes(48 * 1024 * 1024)
-                    .setPrioritizeTimeOverSizeThresholds(true)
-                    .setBackBuffer(0, false)
-                    .build();
-        }
+        // 稳健缓冲配比：1.5s 秒开，维持 15s~35s 蓄水池，64MB 承载 4K 高码率
+        mLoadControl = new DefaultLoadControl.Builder()
+                .setBufferDurationsMs(15_000, 35_000, 1_500, 3_000)
+                .setTargetBufferBytes(64 * 1024 * 1024)
+                .setPrioritizeTimeOverSizeThresholds(true)
+                .setBackBuffer(0, false)
+                .build();
 
         if (mTrackSelector == null) {
             DefaultTrackSelector defaultTrackSelector = new DefaultTrackSelector(mAppContext);
@@ -258,10 +262,8 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             mTrackSelector = defaultTrackSelector;
         }
 
-        // 借鉴原版：强制开启 DecoderFallback (解码器回退能力)
-        if (mRenderersFactory == null) {
-            mRenderersFactory = createCustomRenderersFactory(multiChannel);
-        }
+        // 核心修复：绝对强制装载定制渲染器工厂，绝不给外部篡改的机会
+        mRenderersFactory = createCustomRenderersFactory(multiChannel);
 
         mInternalPlayer = new SimpleExoPlayer.Builder(
                 mAppContext,
@@ -289,7 +291,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     }
 
     private RenderersFactory createCustomRenderersFactory(final boolean enableMultiChannel) {
-        // 借鉴原版：setEnableDecoderFallback(true) 全局生效
         DefaultRenderersFactory factory = new DefaultRenderersFactory(mAppContext) {
             @Override
             protected void buildVideoRenderers(
@@ -302,7 +303,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     long allowedVideoJoiningTimeMs,
                     ArrayList<Renderer> out) {
 
-                writeDebugLog(context, "[buildVideoRenderers] 挂载晶晨专属 4K 稳态硬解渲染器...");
+                writeDebugLog(context, "[buildVideoRenderers] 成功装载晶晨 4K 稳态渲染器与帧心跳监控！");
 
                 MediaCodecVideoRenderer videoRenderer = new MediaCodecVideoRenderer(
                         context,
@@ -348,7 +349,8 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             long presentationTimeUs,
                             long releaseTimeNs) {
                         mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
-                        mIsRecovering = false; // 画面正常吐出新帧，解除哨兵锁定
+                        mHasRenderedFirstFrame = true;
+                        mIsRecovering = false;
                         super.renderOutputBufferV21(codec, index, presentationTimeUs, releaseTimeNs);
                     }
 
@@ -358,6 +360,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             int index,
                             long presentationTimeUs) {
                         mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
+                        mHasRenderedFirstFrame = true;
                         mIsRecovering = false;
                         super.renderOutputBuffer(codec, index, presentationTimeUs);
                     }
@@ -452,20 +455,20 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     }
 
     public void setRenderersFactory(RenderersFactory renderersFactory) {
-        mRenderersFactory = renderersFactory;
+        // 屏蔽外部注入，强制锁定专属定制渲染器工厂
     }
 
     public void setLoadControl(LoadControl loadControl) {
-        mLoadControl = loadControl;
+        // 屏蔽外部覆盖，确保 4K 缓冲配比生效
     }
 
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
         if (path != null) {
-            // 平滑并发：收敛为 2 线程，消除 85°C 强制拔核风险，且实测 10MB/s 带宽足够 4K 播放
+            // 平滑并发：收敛为 4 线程，喂饱 4K 高码率带宽
             if (path.contains("thread=")) {
-                path = path.replaceAll("thread=\\d+", "thread=2");
-                writeDebugLog(mAppContext, "[控温优化] 自动收敛代理并发为 2 线程，平滑保护 CPU 温度与总线");
+                path = path.replaceAll("thread=\\d+", "thread=4");
+                writeDebugLog(mAppContext, "[并发优化] 已自动收敛代理并发为 4 线程，全力保障 4K 高码率吞吐");
             }
         }
         writeDebugLog(mAppContext, "setDataSource: " + path);
@@ -504,6 +507,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             mInternalPlayer.setPlaybackParameters(mSpeedPlaybackParameters);
         }
         mIsPreparing = true;
+        mHasRenderedFirstFrame = false;
+        mLastRenderedFrameTimeRealtime = 0;
+        mIsRecovering = false;
         mInternalPlayer.setMediaSource(mMediaSource, getStartPosition());
         markStartPositionApplied();
         mInternalPlayer.prepare();
@@ -516,6 +522,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             mInternalPlayer.clearMediaItems();
             mIsPreparing = false;
             mRetriedAsHls = false;
+            mHasRenderedFirstFrame = false;
+            mLastRenderedFrameTimeRealtime = 0;
+            mIsRecovering = false;
         }
     }
 
@@ -534,7 +543,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     @Override
     public void seekTo(long time) {
         if (mInternalPlayer == null) return;
-        mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
+        // 跳转时重置首帧检测，等待新画面上屏才激活哨兵
+        mHasRenderedFirstFrame = false;
+        mLastRenderedFrameTimeRealtime = 0;
         mInternalPlayer.seekTo(time);
     }
 
@@ -637,6 +648,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
         switch (playbackState) {
             case Player.STATE_BUFFERING:
+                // 网络缓冲期间绝不判定为卡死
                 mPlayerEventListener.onInfo(MEDIA_INFO_BUFFERING_START, getBufferedPercentage());
                 break;
             case Player.STATE_READY:
