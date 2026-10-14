@@ -79,6 +79,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     public static final boolean DEFAULT_ENABLE_MULTICHANNEL_PCM = false;
 
+    // 日志文件最大体积限制：2MB
+    private static final long MAX_LOG_FILE_SIZE = 2 * 1024 * 1024;
+
     protected Context mAppContext;
     protected SimpleExoPlayer mInternalPlayer;
     protected MediaSource mMediaSource;
@@ -98,7 +101,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     private BroadcastReceiver mModeToggleReceiver;
     private static File sDebugLogFile = null;
 
-    // 回归第一版自愈核心：基于活跃出帧心跳
+    // 活跃出帧监控心跳
     private volatile long mLastRenderedFrameTimeRealtime = 0;
     private int mStallRescueStep = 0;
     private Handler mWatchdogHandler;
@@ -125,8 +128,18 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     sDebugLogFile = new File(context.getFilesDir(), "exo_debug.log");
                 }
             }
+
+            // 文件尺寸达标清空机制：超过 2MB 时清空重置
+            boolean append = true;
+            if (sDebugLogFile.exists() && sDebugLogFile.length() > MAX_LOG_FILE_SIZE) {
+                append = false;
+            }
+
             String time = new SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
-            FileWriter writer = new FileWriter(sDebugLogFile, true);
+            FileWriter writer = new FileWriter(sDebugLogFile, append);
+            if (!append) {
+                writer.write("--- [日志达到 2MB 上限，已自动清空循环轮转] ---\n");
+            }
             writer.write(time + " " + msg + "\n");
             writer.flush();
             writer.close();
@@ -188,7 +201,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
     }
 
-    // 优化的稳态自愈哨兵：不断流、不倒带，彻底告别来回横跳
+    // 优化的极速脱困看门狗哨兵
     private void initWatchdog() {
         mWatchdogHandler = new Handler(Looper.getMainLooper());
         mWatchdogRunnable = new Runnable() {
@@ -196,33 +209,33 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             public void run() {
                 if (mInternalPlayer != null && isPlaying()) {
                     long now = SystemClock.elapsedRealtime();
-                    // 门槛设定为 2000ms：过滤掉正常的微小网络波动，起播3秒后才介入
+                    // 门槛缩短至 1200ms：快速捕捉底层卡顿
                     if (mLastRenderedFrameTimeRealtime > 0 
-                            && (now - mLastRenderedFrameTimeRealtime > 2000) 
+                            && (now - mLastRenderedFrameTimeRealtime > 1200) 
                             && getCurrentPosition() > 3000) {
                         
                         long currentPos = getCurrentPosition();
                         long duration = getDuration();
 
                         if (mStallRescueStep == 0) {
-                            // 第一顺位：执行第一版表现优秀的“原地 Flush”，不跳时、不倒退、不断网
+                            // 第一顺位：尝试原地 Flush 解锁显存拥塞
                             writeDebugLog(mAppContext, "[自愈哨兵] 检测到视频硬件停滞，执行温和【原地 Flush】自愈！");
                             mStallRescueStep = 1;
-                            // 关键保护：给予 2.5 秒的宽限恢复期，严禁连环追命触发
-                            mLastRenderedFrameTimeRealtime = now + 2500;
+                            // 宽限期压缩至 800ms：快速验证是否能恢复出帧
+                            mLastRenderedFrameTimeRealtime = now + 800;
                             mInternalPlayer.seekTo(currentPos);
                         } else {
-                            // 第二顺位：原地 Flush 后仍未解开（遇到损坏帧），真正模拟遥控器快进 2 秒跨过坏块
+                            // 第二顺位：原地未能恢复（遇到损坏 NAL 坏块），立即前跳 2 秒跨过阻碍
                             long targetPos = (duration > 0) ? Math.min(currentPos + 2000, duration) : currentPos + 2000;
                             writeDebugLog(mAppContext, "[自愈哨兵] 原地 Flush 后仍受阻(损坏帧)，自动【快进 2 秒】跨过坏块点！目标点: " + targetPos);
                             mStallRescueStep = 0;
-                            mLastRenderedFrameTimeRealtime = now + 3000; // 快进跨度稍大，给予 3 秒充足缓冲宽限
+                            mLastRenderedFrameTimeRealtime = now + 2500; // 跨过坏帧后给予 2.5 秒正常缓冲恢复期
                             mInternalPlayer.seekTo(targetPos);
                         }
                     }
                 }
                 if (mWatchdogHandler != null) {
-                    mWatchdogHandler.postDelayed(this, 500); // 半秒巡检一次
+                    mWatchdogHandler.postDelayed(this, 400); // 400ms 高频巡检
                 }
             }
         };
@@ -239,10 +252,10 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
         mStallRescueStep = 0;
 
-        // 回归第一版优选缓冲配比（15s ~ 30s），保持平稳拉流
+        // 4K 60fps 专属大水池配置：大幅提高后台预读水位，彻底消除断续卡顿感
         mLoadControl = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(15_000, 30_000, 1_000, 3_000)
-                .setTargetBufferBytes(64 * 1024 * 1024)
+                .setBufferDurationsMs(20_000, 50_000, 2_500, 10_000)
+                .setTargetBufferBytes(128 * 1024 * 1024) // 显存缓冲扩容至 128MB
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .setBackBuffer(0, false)
                 .build();
@@ -329,7 +342,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         return mediaFormat;
                     }
 
-                    // 回归第一版设置：严禁丢弃已解码帧，守护参考帧队列完整性
+                    // 严禁丢弃已解码帧，守护参考帧队列完整性
                     @Override
                     protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
                         return false;
@@ -457,7 +470,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
         if (path != null) {
-            // 回归第一版黄金配比：锁定 3 线程，完全消除 CPU 与网络总线挤压
+            // 收敛代理并发为 3 线程，平衡带宽吞吐与 CPU / 总线开销
             if (path.contains("thread=")) {
                 path = path.replaceAll("thread=\\d+", "thread=3");
                 writeDebugLog(mAppContext, "[并发优化] 已自动收敛代理并发为 3 线程以保护 CPU 与总线稳定");
@@ -531,7 +544,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     @Override
     public void seekTo(long time) {
         if (mInternalPlayer == null) return;
-        // 用户主动 Seek 或哨兵介入后，赋予 2.5 秒的缓冲保护，严禁追命连环判定
+        // 用户主动 Seek 赋予 2.5 秒正常蓄水保护
         mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime() + 2500;
         mInternalPlayer.seekTo(time);
     }
