@@ -10,6 +10,7 @@ import android.content.res.AssetFileDescriptor;
 import android.media.MediaFormat;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -97,6 +98,11 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     private BroadcastReceiver mModeToggleReceiver;
     private static File sDebugLogFile = null;
 
+    // 自愈哨兵：监测视频送显是否中断
+    private volatile long mLastRenderedFrameTimeRealtime = 0;
+    private Handler mWatchdogHandler;
+    private Runnable mWatchdogRunnable;
+
     public static boolean isMultiChannelModeEnabled(Context context) {
         SharedPreferences sp = context.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
         return sp.getBoolean(KEY_MULTICHANNEL_MODE, DEFAULT_ENABLE_MULTICHANNEL_PCM);
@@ -107,9 +113,8 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         sp.edit().putBoolean(KEY_MULTICHANNEL_MODE, enabled).apply();
     }
 
-    // 彻底修复：使用缓存路径，严禁高频查询 getExternalFilesDir 导致 Vold Binder IPC 阻塞
     private static synchronized void writeDebugLog(Context context, String msg) {
-        Log.e(TAG, msg);
+        Log.i(TAG, msg);
         try {
             if (sDebugLogFile == null) {
                 File sdLog = new File("/sdcard/exo_debug.log");
@@ -144,6 +149,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         mAppContext = context.getApplicationContext();
         mMediaSourceHelper = ExoMediaSourceHelper.getInstance(context);
         registerModeReceiver();
+        initWatchdog();
     }
 
     private void registerModeReceiver() {
@@ -181,6 +187,34 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
     }
 
+    // 参考 Kodi 机制的解码器死锁脱困看门狗
+    private void initWatchdog() {
+        mWatchdogHandler = new Handler(Looper.getMainLooper());
+        mWatchdogRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (mInternalPlayer != null && isPlaying()) {
+                    long now = SystemClock.elapsedRealtime();
+                    // 如果播放状态正常推进，但画面超过 1200ms 未吐出新帧（且起播已超过3秒），判定为底层 VPU 显存枯竭挂起
+                    if (mLastRenderedFrameTimeRealtime > 0 
+                            && (now - mLastRenderedFrameTimeRealtime > 1200) 
+                            && getCurrentPosition() > 3000) {
+                        
+                        writeDebugLog(mAppContext, "[自愈哨兵] 检测到视频硬件帧停滞，触发 Flush 脱困自愈机制！");
+                        mLastRenderedFrameTimeRealtime = now; // 抑制连续触发
+                        
+                        // 原地触发微跳跃：强制触发 OMX_CommandFlush 与 VPU 显存池全面释放重置
+                        long currentPos = getCurrentPosition();
+                        mInternalPlayer.seekTo(currentPos);
+                    }
+                }
+                if (mWatchdogHandler != null) {
+                    mWatchdogHandler.postDelayed(this, 500); // 每半秒巡检一次
+                }
+            }
+        };
+    }
+
     @Override
     public void initPlayer() {
         registerModeReceiver();
@@ -189,11 +223,13 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         boolean multiChannel = isMultiChannelModeEnabled(mAppContext);
         writeDebugLog(mAppContext, "[initPlayer] 当前音频输出模式: " + (multiChannel ? "【功放模式 5.1 直通】" : "【电视模式 2.0 下混】"));
 
-        // 核心修复：10s~30s 迟滞区间，内存上限设为 80MB，充满后可连续休眠 20 秒，消除高频网络震荡
+        mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
+
+        // 终极优化：平滑细水长流缓冲梯度（15s~30s），保障常规 4K 顺畅拉流
         mLoadControl = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(10_000, 30_000, 1_500, 3_000)
-                .setTargetBufferBytes(80 * 1024 * 1024)
-                .setPrioritizeTimeOverSizeThresholds(false)
+                .setBufferDurationsMs(15_000, 30_000, 2_000, 4_000)
+                .setTargetBufferBytes(64 * 1024 * 1024)
+                .setPrioritizeTimeOverSizeThresholds(true)
                 .setBackBuffer(0, false)
                 .build();
 
@@ -231,20 +267,10 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
         mInternalPlayer.addListener(this);
 
-        final Handler monitorHandler = new Handler(Looper.getMainLooper());
-        monitorHandler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (mInternalPlayer != null && mInternalPlayer.isPlaying()) {
-                    long currentPos = mInternalPlayer.getCurrentPosition() / 1000;
-                    long bufferedDur = mInternalPlayer.getTotalBufferedDuration() / 1000;
-                    writeDebugLog(mAppContext, "[状态心跳] 播放进度=" + currentPos + "s | 剩余缓冲=" + bufferedDur + "s");
-                }
-                if (mInternalPlayer != null) {
-                    monitorHandler.postDelayed(this, 2000);
-                }
-            }
-        }, 2000);
+        if (mWatchdogHandler != null) {
+            mWatchdogHandler.removeCallbacks(mWatchdogRunnable);
+            mWatchdogHandler.postDelayed(mWatchdogRunnable, 1000);
+        }
     }
 
     private RenderersFactory createCustomRenderersFactory(final boolean enableMultiChannel) {
@@ -260,7 +286,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     long allowedVideoJoiningTimeMs,
                     ArrayList<Renderer> out) {
 
-                writeDebugLog(context, "[buildVideoRenderers] 挂载晶晨 S912 专有零丢帧/低延迟硬解渲染器...");
+                writeDebugLog(context, "[buildVideoRenderers] 挂载 4K 稳态硬解渲染器...");
 
                 MediaCodecVideoRenderer videoRenderer = new MediaCodecVideoRenderer(
                         context,
@@ -284,22 +310,21 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                                 format, codecMimeType, codecMaxValues, codecOperatingRate,
                                 deviceNeedsNoPostProcessWorkaround, tunnelingAudioSessionId);
 
-                        // 1. 扩充单帧输入缓冲区，保证 4K 大 I 帧完整喂入
+                        // 扩大输入缓冲至 4MB，确保 4K 码流中的大 I 帧完整喂入
                         mediaFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4 * 1024 * 1024);
-                        // 2. 激活低延迟管线，缩短驱动队列深度，为 4K 释放更多物理 CMA 显存
-                        mediaFormat.setInteger("vdec-lowlatency", 1);
+                        
+                        // 彻底移除 vdec-lowlatency，确保驱动保留标准 DPB 参考帧裕量
                         return mediaFormat;
                     }
 
                     @Override
                     protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 严禁跳帧，保护 DPB 参考链
                         return false;
                     }
 
                     @Override
                     protected boolean shouldDropOutputBuffer(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 核心修复：严禁抛弃已硬解视频帧，防止破坏晶晨硬件参考链导致驱动死锁
+                        // 严禁丢弃已解码帧，防止破坏底层硬件参考队列
                         return false;
                     }
 
@@ -309,13 +334,23 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             int index,
                             long presentationTimeUs,
                             long releaseTimeNs) {
-                        // 核心修复：强制立即送显，规避 Android 5.1 纳秒时间戳死锁，促使 SurfaceFlinger 尽早归还显存块
-                        renderOutputBuffer(codec, index, presentationTimeUs);
+                        // 更新最新送显活跃心跳
+                        mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
+                        // 恢复原生垂直同步送显，消除断流与声画脱节
+                        super.renderOutputBufferV21(codec, index, presentationTimeUs, releaseTimeNs);
+                    }
+
+                    @Override
+                    protected void renderOutputBuffer(
+                            MediaCodecAdapter codec,
+                            int index,
+                            long presentationTimeUs) {
+                        mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
+                        super.renderOutputBuffer(codec, index, presentationTimeUs);
                     }
                 };
 
                 out.add(videoRenderer);
-                writeDebugLog(context, "[buildVideoRenderers] 定制零丢帧渲染器装载成功！");
             }
 
             @Override
@@ -339,14 +374,13 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     Renderer ffmpegRenderer = (Renderer) constructor.newInstance(eventHandler, eventListener, audioSink);
                     out.add(ffmpegRenderer);
                     ffmpegAdded = true;
-                    writeDebugLog(context, "[buildAudioRenderers] 成功挂载 FfmpegAudioRenderer 到第 1 顺位！");
+                    writeDebugLog(context, "[buildAudioRenderers] FFmpegAudioRenderer 挂载成功！");
                 } catch (Throwable e) {
-                    writeDebugLog(context, "[buildAudioRenderers] 挂载 FfmpegAudioRenderer 异常: " + e.getMessage());
+                    writeDebugLog(context, "[buildAudioRenderers] FFmpegAudioRenderer 异常: " + e.getMessage());
                 }
 
                 out.add(new MediaCodecAudioRenderer(
                         context, mediaCodecSelector, enableDecoderFallback, eventHandler, eventListener, audioSink));
-                writeDebugLog(context, "[buildAudioRenderers] 渲染器就绪, 数量=" + out.size() + ", FFmpeg优先=" + ffmpegAdded);
             }
 
             @Nullable
@@ -373,10 +407,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     private void checkFfmpegExtensionStatus() {
         try {
             System.loadLibrary("ffmpegJNI");
-            writeDebugLog(mAppContext, "[原生加载] System.loadLibrary(\"ffmpegJNI\") 成功！");
+            writeDebugLog(mAppContext, "[原生库自检] System.loadLibrary(\"ffmpegJNI\") 成功！");
         } catch (Throwable t) {
-            writeDebugLog(mAppContext, "[原生加载失败] dlopen 报错详情: " + t.getMessage());
-            Log.e(TAG, "Native loadLibrary failed", t);
+            writeDebugLog(mAppContext, "[原生库自检] dlopen 报错: " + t.getMessage());
         }
 
         try {
@@ -387,20 +420,13 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             if (isAvailable) {
                 try {
                     Method getVersionMethod = ffmpegLibClass.getMethod("getVersion");
-                    info += " (FFmpeg 版本: " + getVersionMethod.invoke(null) + ")";
-                } catch (Throwable ignored) {
-                }
-                try {
-                    Method supportsFormatMethod = ffmpegLibClass.getMethod("supportsFormat", String.class);
-                    boolean supEac3 = (Boolean) supportsFormatMethod.invoke(null, "audio/eac3");
-                    boolean supDts = (Boolean) supportsFormatMethod.invoke(null, "audio/vnd.dts");
-                    info += " | 格式支持: EAC3=" + supEac3 + ", DTS=" + supDts;
+                    info += " (版本: " + getVersionMethod.invoke(null) + ")";
                 } catch (Throwable ignored) {
                 }
             }
             writeDebugLog(mAppContext, info);
         } catch (Throwable e) {
-            writeDebugLog(mAppContext, "[自检异常] 无法调用 FfmpegLibrary: " + e.getMessage());
+            writeDebugLog(mAppContext, "[自检] 无法调用 FfmpegLibrary: " + e.getMessage());
         }
     }
 
@@ -419,12 +445,10 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
         if (path != null) {
-            if (path.contains("thread=16")) {
-                path = path.replace("thread=16", "thread=3");
-                writeDebugLog(mAppContext, "[并发优化] 检测到 16 线程请求，已自动优化为 3 线程以保护系统总线");
-            } else if (path.contains("thread=6")) {
-                path = path.replace("thread=6", "thread=3");
-                writeDebugLog(mAppContext, "[并发优化] 检测到 6 线程请求，已自动优化为 3 线程以保护系统总线");
+            // 平滑并发：对网盘代理请求自动收敛到 4 线程，兼顾高码率 4K 带宽与 CPU 负载
+            if (path.contains("thread=")) {
+                path = path.replaceAll("thread=\\d+", "thread=4");
+                writeDebugLog(mAppContext, "[并发优化] 已自动收敛代理并发为 4 线程以保护 CPU 与总线稳定");
             }
         }
         writeDebugLog(mAppContext, "setDataSource: " + path);
@@ -493,11 +517,16 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     @Override
     public void seekTo(long time) {
         if (mInternalPlayer == null) return;
+        mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
         mInternalPlayer.seekTo(time);
     }
 
     @Override
     public void release() {
+        if (mWatchdogHandler != null) {
+            mWatchdogHandler.removeCallbacks(mWatchdogRunnable);
+            mWatchdogHandler = null;
+        }
         if (mModeToggleReceiver != null) {
             try {
                 mAppContext.unregisterReceiver(mModeToggleReceiver);
@@ -609,7 +638,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         if (cause != null) {
             errDetail += " | cause: " + cause.getClass().getSimpleName() + ": " + cause.getMessage();
         }
-        writeDebugLog(mAppContext, "[播放报错] " + errDetail);
+        writeDebugLog(mAppContext, "[播放异常] " + errDetail);
 
         if (error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED
@@ -617,7 +646,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED) {
 
             if (isMultiChannelModeEnabled(mAppContext)) {
-                writeDebugLog(mAppContext, "[容灾生效] 功放模式声卡异常，自动切换回电视立体声模式！");
+                writeDebugLog(mAppContext, "[声卡保护] 自动降级为电视立体声模式");
                 setMultiChannelModeEnabled(mAppContext, false);
                 showToast("声卡不支持多声道，已自动切换为电视立体声模式");
                 if (mInternalPlayer != null) {
@@ -634,7 +663,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             }
 
             if (trackSelector != null && mInternalPlayer != null) {
-                writeDebugLog(mAppContext, "[容灾生效] 重置音轨到默认");
                 trackSelector.setParameters(trackSelector.buildUponParameters().clearSelectionOverrides(C.TRACK_TYPE_AUDIO));
                 mInternalPlayer.prepare();
                 mInternalPlayer.setPlayWhenReady(true);
@@ -695,23 +723,17 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
         @Override
         public AudioFormat onConfigure(AudioFormat inputAudioFormat) throws UnhandledAudioFormatException {
-            writeDebugLog(mContext, "[AudioProcessor] 输入格式: sampleRate=" + inputAudioFormat.sampleRate
-                    + ", channels=" + inputAudioFormat.channelCount + ", encoding=" + inputAudioFormat.encoding);
-
-            if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT) {
-                return AudioFormat.NOT_SET;
-            }
-            if (inputAudioFormat.channelCount <= 2) {
+            if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT || inputAudioFormat.channelCount <= 2) {
                 return AudioFormat.NOT_SET;
             }
 
             if (mEnableMultiChannel) {
-                writeDebugLog(mContext, "[AudioProcessor] 【功放模式生效】放行原生 " + inputAudioFormat.channelCount + " 声道 PCM 直通！");
+                writeDebugLog(mContext, "[AudioProcessor] 【功放直通】放行原生 " + inputAudioFormat.channelCount + " 声道 PCM");
                 return AudioFormat.NOT_SET;
             }
 
-            writeDebugLog(mContext, "[AudioProcessor] 【电视模式生效】激活 ITU-R BS.775 下混: "
-                    + inputAudioFormat.channelCount + " 声道 -> 2 声道输出");
+            writeDebugLog(mContext, "[AudioProcessor] 【立体声下混】激活 ITU-R BS.775 算法: "
+                    + inputAudioFormat.channelCount + " 声道 -> 2 声道");
             return new AudioFormat(inputAudioFormat.sampleRate, 2, C.ENCODING_PCM_16BIT);
         }
 
