@@ -270,7 +270,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     long allowedVideoJoiningTimeMs,
                     ArrayList<Renderer> out) {
 
-                writeDebugLog(context, "[buildVideoRenderers] 挂载零丢帧直出版 MediaCodecVideoRenderer...");
+                writeDebugLog(context, "[buildVideoRenderers] 挂载强制立即呈现版 MediaCodecVideoRenderer...");
 
                 MediaCodecVideoRenderer videoRenderer = new MediaCodecVideoRenderer(
                         context,
@@ -283,14 +283,26 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
                     @Override
                     protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 【核心修复 1】禁止因为落后丢弃整个 GOP 关键帧序列
+                        // 禁止丢弃整个 GOP 关键帧序列
                         return false;
                     }
 
                     @Override
                     protected boolean shouldDropOutputBuffer(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 【核心修复 2】彻底禁止主动丢帧！已硬解帧 100% 直出送显，消除 10 秒卡屏
-                        return false;
+                        // 仅当严重落后超过 250ms 时才允许丢弃单帧泄压，防止微小波动误杀画面
+                        return earlyUs < -250_000 && !isLastBuffer;
+                    }
+
+                    @Override
+                    protected void renderOutputBufferV21(
+                            com.google.android.exoplayer2.mediacodec.MediaCodecAdapter codec,
+                            int index,
+                            long presentationTimeUs,
+                            long releaseTimeNs) {
+                        // 【核心根治断点】
+                        // 抛弃会导致 Amlogic S912 (Android 5.1) 驱动死锁的 releaseTimeNs 纳秒时间戳！
+                        // 强制降级调用非时间戳的立即呈现方法 (codec.releaseOutputBuffer(index, true))
+                        renderOutputBuffer(codec, index, presentationTimeUs);
                     }
                 };
 
