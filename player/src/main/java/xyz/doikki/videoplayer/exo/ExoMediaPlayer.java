@@ -187,7 +187,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         boolean multiChannel = isMultiChannelModeEnabled(mAppContext);
         writeDebugLog(mAppContext, "[initPlayer] 当前音频输出模式: " + (multiChannel ? "【功放模式 5.1 直通】" : "【电视模式 2.0 下混】"));
 
-        // 优化 LoadControl：拉大 20s~60s 回差，杜绝缓冲区边缘频繁启停抖动
         mLoadControl = new DefaultLoadControl.Builder()
                 .setBufferDurationsMs(20_000, 60_000, 2_000, 4_000)
                 .setTargetBufferBytes(128 * 1024 * 1024)
@@ -229,7 +228,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
         mInternalPlayer.addListener(this);
 
-        // 监控器
         mInternalPlayer.addAnalyticsListener(new com.google.android.exoplayer2.analytics.AnalyticsListener() {
             @Override
             public void onDroppedVideoFrames(EventTime eventTime, int droppedFrames, long elapsedMs) {
@@ -272,7 +270,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     long allowedVideoJoiningTimeMs,
                     ArrayList<Renderer> out) {
 
-                writeDebugLog(context, "[buildVideoRenderers] 挂载防卡屏定制版 MediaCodecVideoRenderer...");
+                writeDebugLog(context, "[buildVideoRenderers] 挂载零丢帧直出版 MediaCodecVideoRenderer...");
 
                 MediaCodecVideoRenderer videoRenderer = new MediaCodecVideoRenderer(
                         context,
@@ -285,15 +283,14 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
                     @Override
                     protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 【核心修复 1】彻底禁用“落后500ms就狂丢整个GOP关键帧序列”的机制！消除10秒定格
+                        // 【核心修复 1】禁止因为落后丢弃整个 GOP 关键帧序列
                         return false;
                     }
 
                     @Override
                     protected boolean shouldDropOutputBuffer(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 【核心修复 2】放宽单帧丢帧阈值：由默认 -30ms 放宽至 -120ms
-                        // 允许硬件解码轻微时钟波动，解码出的帧尽最大可能送显上屏，维持连续画面
-                        return earlyUs < -120_000 && !isLastBuffer;
+                        // 【核心修复 2】彻底禁止主动丢帧！已硬解帧 100% 直出送显，消除 10 秒卡屏
+                        return false;
                     }
                 };
 
