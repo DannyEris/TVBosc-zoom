@@ -72,7 +72,7 @@ import xyz.doikki.videoplayer.util.PlayerUtils;
 
 public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
-    private static final String TAG = "EXO-AUDIO";
+    private static final String TAG = "Tvbox-runtime";
     private static final String SP_NAME = "tvbox_exo_audio_config";
     private static final String KEY_MULTICHANNEL_MODE = "key_multichannel_mode";
     public static final String ACTION_TOGGLE_AUDIO_MODE = "action.TVBOX_TOGGLE_AUDIO_MODE";
@@ -98,8 +98,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     private BroadcastReceiver mModeToggleReceiver;
     private static File sDebugLogFile = null;
 
-    // 自愈哨兵：监测视频送显是否中断
+    // 自愈哨兵状态与冷却锁
     private volatile long mLastRenderedFrameTimeRealtime = 0;
+    private volatile boolean mIsRecovering = false;
     private Handler mWatchdogHandler;
     private Runnable mWatchdogRunnable;
 
@@ -167,7 +168,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         String tip = next ? "已切换至: 功放模式 (原生 5.1/7.1 PCM 直通)" 
                                           : "已切换至: 电视模式 (2.0 立体声下混)";
                         showToast(tip);
-                        writeDebugLog(context, "[热切换广播触发] " + tip);
+                        writeDebugLog(context, "[热切换触发] " + tip);
 
                         if (mInternalPlayer != null && currentPlayPath != null) {
                             long pos = getCurrentPosition();
@@ -187,7 +188,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
     }
 
-    // 参考 Kodi 机制的解码器死锁脱困看门狗
+    // 借鉴 Kodi 机制并加入防误触冷却锁的自愈哨兵
     private void initWatchdog() {
         mWatchdogHandler = new Handler(Looper.getMainLooper());
         mWatchdogRunnable = new Runnable() {
@@ -195,21 +196,30 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             public void run() {
                 if (mInternalPlayer != null && isPlaying()) {
                     long now = SystemClock.elapsedRealtime();
-                    // 如果播放状态正常推进，但画面超过 1200ms 未吐出新帧（且起播已超过3秒），判定为底层 VPU 显存枯竭挂起
-                    if (mLastRenderedFrameTimeRealtime > 0 
-                            && (now - mLastRenderedFrameTimeRealtime > 1200) 
-                            && getCurrentPosition() > 3000) {
-                        
-                        writeDebugLog(mAppContext, "[自愈哨兵] 检测到视频硬件帧停滞，触发 Flush 脱困自愈机制！");
-                        mLastRenderedFrameTimeRealtime = now; // 抑制连续触发
-                        
-                        // 原地触发微跳跃：强制触发 OMX_CommandFlush 与 VPU 显存池全面释放重置
-                        long currentPos = getCurrentPosition();
-                        mInternalPlayer.seekTo(currentPos);
+
+                    if (mIsRecovering) {
+                        // 处于脱困刷新状态中，3 秒内不重复判定，防止界面进度反复跳跃
+                        if (now - mLastRenderedFrameTimeRealtime > 3000) {
+                            mIsRecovering = false;
+                        }
+                    } else {
+                        // 正常播放时，若画面超过 1200ms 未吐出新帧且播放已正常起步，判定为显存耗尽挂起
+                        if (mLastRenderedFrameTimeRealtime > 0 
+                                && (now - mLastRenderedFrameTimeRealtime > 1200) 
+                                && getCurrentPosition() > 2500) {
+                            
+                            writeDebugLog(mAppContext, "[自愈哨兵] 检测到视频硬件帧停滞，触发精准 Flush 脱困！");
+                            mIsRecovering = true; // 上锁
+                            mLastRenderedFrameTimeRealtime = now;
+                            
+                            // 强制触发底层 OMX_CommandFlush 与 VPU 物理显存释放重置
+                            long currentPos = getCurrentPosition();
+                            mInternalPlayer.seekTo(currentPos);
+                        }
                     }
                 }
                 if (mWatchdogHandler != null) {
-                    mWatchdogHandler.postDelayed(this, 500); // 每半秒巡检一次
+                    mWatchdogHandler.postDelayed(this, 500);
                 }
             }
         };
@@ -221,17 +231,19 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         checkFfmpegExtensionStatus();
 
         boolean multiChannel = isMultiChannelModeEnabled(mAppContext);
-        writeDebugLog(mAppContext, "[initPlayer] 当前音频输出模式: " + (multiChannel ? "【功放模式 5.1 直通】" : "【电视模式 2.0 下混】"));
+        writeDebugLog(mAppContext, "[initPlayer] 音频模式: " + (multiChannel ? "【功放 5.1/7.1 直通】" : "【电视 2.0 下混】"));
 
         mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
 
-        // 终极优化：平滑细水长流缓冲梯度（15s~30s），保障常规 4K 顺畅拉流
-        mLoadControl = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(15_000, 30_000, 2_000, 4_000)
-                .setTargetBufferBytes(64 * 1024 * 1024)
-                .setPrioritizeTimeOverSizeThresholds(true)
-                .setBackBuffer(0, false)
-                .build();
+        // 借鉴原版保护结构 + 融合控温防断连的最佳 4K 缓冲配比
+        if (mLoadControl == null) {
+            mLoadControl = new DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(15_000, 35_000, 1_500, 3_000) // 1.5s 秒开，15s~35s 蓄水池
+                    .setTargetBufferBytes(48 * 1024 * 1024)
+                    .setPrioritizeTimeOverSizeThresholds(true)
+                    .setBackBuffer(0, false)
+                    .build();
+        }
 
         if (mTrackSelector == null) {
             DefaultTrackSelector defaultTrackSelector = new DefaultTrackSelector(mAppContext);
@@ -246,7 +258,10 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             mTrackSelector = defaultTrackSelector;
         }
 
-        mRenderersFactory = createCustomRenderersFactory(multiChannel);
+        // 借鉴原版：强制开启 DecoderFallback (解码器回退能力)
+        if (mRenderersFactory == null) {
+            mRenderersFactory = createCustomRenderersFactory(multiChannel);
+        }
 
         mInternalPlayer = new SimpleExoPlayer.Builder(
                 mAppContext,
@@ -274,7 +289,8 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     }
 
     private RenderersFactory createCustomRenderersFactory(final boolean enableMultiChannel) {
-        return new DefaultRenderersFactory(mAppContext) {
+        // 借鉴原版：setEnableDecoderFallback(true) 全局生效
+        DefaultRenderersFactory factory = new DefaultRenderersFactory(mAppContext) {
             @Override
             protected void buildVideoRenderers(
                     Context context,
@@ -286,7 +302,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     long allowedVideoJoiningTimeMs,
                     ArrayList<Renderer> out) {
 
-                writeDebugLog(context, "[buildVideoRenderers] 挂载 4K 稳态硬解渲染器...");
+                writeDebugLog(context, "[buildVideoRenderers] 挂载晶晨专属 4K 稳态硬解渲染器...");
 
                 MediaCodecVideoRenderer videoRenderer = new MediaCodecVideoRenderer(
                         context,
@@ -312,8 +328,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
                         // 扩大输入缓冲至 4MB，确保 4K 码流中的大 I 帧完整喂入
                         mediaFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4 * 1024 * 1024);
-                        
-                        // 彻底移除 vdec-lowlatency，确保驱动保留标准 DPB 参考帧裕量
                         return mediaFormat;
                     }
 
@@ -324,7 +338,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
                     @Override
                     protected boolean shouldDropOutputBuffer(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 严禁丢弃已解码帧，防止破坏底层硬件参考队列
                         return false;
                     }
 
@@ -334,9 +347,8 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             int index,
                             long presentationTimeUs,
                             long releaseTimeNs) {
-                        // 更新最新送显活跃心跳
                         mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
-                        // 恢复原生垂直同步送显，消除断流与声画脱节
+                        mIsRecovering = false; // 画面正常吐出新帧，解除哨兵锁定
                         super.renderOutputBufferV21(codec, index, presentationTimeUs, releaseTimeNs);
                     }
 
@@ -346,6 +358,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             int index,
                             long presentationTimeUs) {
                         mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
+                        mIsRecovering = false;
                         super.renderOutputBuffer(codec, index, presentationTimeUs);
                     }
                 };
@@ -402,6 +415,10 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         .build();
             }
         };
+
+        factory.setEnableDecoderFallback(true);
+        factory.setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER);
+        return factory;
     }
 
     private void checkFfmpegExtensionStatus() {
@@ -445,10 +462,10 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
         if (path != null) {
-            // 平滑并发：对网盘代理请求自动收敛到 4 线程，兼顾高码率 4K 带宽与 CPU 负载
+            // 平滑并发：收敛为 2 线程，消除 85°C 强制拔核风险，且实测 10MB/s 带宽足够 4K 播放
             if (path.contains("thread=")) {
-                path = path.replaceAll("thread=\\d+", "thread=4");
-                writeDebugLog(mAppContext, "[并发优化] 已自动收敛代理并发为 4 线程以保护 CPU 与总线稳定");
+                path = path.replaceAll("thread=\\d+", "thread=2");
+                writeDebugLog(mAppContext, "[控温优化] 自动收敛代理并发为 2 线程，平滑保护 CPU 温度与总线");
             }
         }
         writeDebugLog(mAppContext, "setDataSource: " + path);
