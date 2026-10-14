@@ -1,11 +1,13 @@
 package xyz.doikki.videoplayer.exo;
 
+import android.annotation.SuppressLint;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.res.AssetFileDescriptor;
+import android.media.MediaFormat;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -19,6 +21,7 @@ import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.DefaultLoadControl;
 import com.google.android.exoplayer2.DefaultRenderersFactory;
+import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.LoadControl;
 import com.google.android.exoplayer2.PlaybackException;
 import com.google.android.exoplayer2.PlaybackParameters;
@@ -183,9 +186,10 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         boolean multiChannel = isMultiChannelModeEnabled(mAppContext);
         writeDebugLog(mAppContext, "[initPlayer] 当前音频输出模式: " + (multiChannel ? "【功放模式 5.1 直通】" : "【电视模式 2.0 下混】"));
 
+        // 优化缓冲配置：削减至 32MB / 最大 30s，防止突破 192MB 堆内存上限引发 GC 顿挫与代理超时
         mLoadControl = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(20_000, 60_000, 2_000, 4_000)
-                .setTargetBufferBytes(128 * 1024 * 1024)
+                .setBufferDurationsMs(15_000, 30_000, 1_500, 3_000)
+                .setTargetBufferBytes(32 * 1024 * 1024)
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .setBackBuffer(0, false)
                 .build();
@@ -266,7 +270,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     long allowedVideoJoiningTimeMs,
                     ArrayList<Renderer> out) {
 
-                writeDebugLog(context, "[buildVideoRenderers] 挂载标准自适应参考帧 MediaCodecVideoRenderer...");
+                writeDebugLog(context, "[buildVideoRenderers] 挂载晶晨专用零丢帧渲染器(启用 freerun)...");
 
                 MediaCodecVideoRenderer videoRenderer = new MediaCodecVideoRenderer(
                         context,
@@ -278,14 +282,34 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         50) {
 
                     @Override
+                    @SuppressLint("InlinedApi")
+                    protected MediaFormat getMediaFormat(
+                            Format format,
+                            String codecMimeType,
+                            CodecMaxValues codecMaxValues,
+                            float codecOperatingRate,
+                            boolean deviceNeedsNoPostProcessWorkaround,
+                            int tunnelingAudioSessionId) {
+                        MediaFormat mediaFormat = super.getMediaFormat(
+                                format, codecMimeType, codecMaxValues, codecOperatingRate,
+                                deviceNeedsNoPostProcessWorkaround, tunnelingAudioSessionId);
+
+                        // 仅激活晶晨驱动底层的 freerun 自由渲染流水线，避开 tsync 阻塞
+                        // 严禁在此处添加 max-dec-frame-buffering 参数！
+                        mediaFormat.setInteger("vdec-lowlatency", 1);
+                        return mediaFormat;
+                    }
+
+                    @Override
                     protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
+                        // 严禁跳帧到关键帧，确保硬解 DPB 参考链完整
                         return false;
                     }
 
                     @Override
                     protected boolean shouldDropOutputBuffer(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 允许解码器轻微呼吸容差，严重滞后才丢弃
-                        return earlyUs < -200_000 && !isLastBuffer;
+                        // 严禁丢弃硬解缓冲，防止底层释放未完成参考帧导致看门狗崩溃
+                        return false;
                     }
 
                     @Override
@@ -294,13 +318,13 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             int index,
                             long presentationTimeUs,
                             long releaseTimeNs) {
-                        // 规避 Android 5.1 纳秒时间戳死锁，强制调用立即送显
+                        // 规避 Android 5.1 纳秒时间戳死锁，强制立即送显
                         renderOutputBuffer(codec, index, presentationTimeUs);
                     }
                 };
 
                 out.add(videoRenderer);
-                writeDebugLog(context, "[buildVideoRenderers] 定制视频渲染器装载成功！");
+                writeDebugLog(context, "[buildVideoRenderers] 定制零丢帧渲染器装载成功！");
             }
 
             @Override
