@@ -45,6 +45,8 @@ import com.google.android.exoplayer2.trackselection.TrackSelector;
 import com.google.android.exoplayer2.upstream.DefaultBandwidthMeter;
 import com.google.android.exoplayer2.util.Clock;
 import com.google.android.exoplayer2.util.EventLogger;
+import com.google.android.exoplayer2.video.MediaCodecVideoRenderer;
+import com.google.android.exoplayer2.video.VideoRendererEventListener;
 import com.google.android.exoplayer2.video.VideoSize;
 
 import java.io.File;
@@ -159,7 +161,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         showToast(tip);
                         writeDebugLog(context, "[热切换广播触发] " + tip);
 
-                        // 仅释放并重建底层播放器，不销毁广播监听器本身
                         if (mInternalPlayer != null && currentPlayPath != null) {
                             long pos = getCurrentPosition();
                             mInternalPlayer.removeListener(ExoMediaPlayer.this);
@@ -186,20 +187,13 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         boolean multiChannel = isMultiChannelModeEnabled(mAppContext);
         writeDebugLog(mAppContext, "[initPlayer] 当前音频输出模式: " + (multiChannel ? "【功放模式 5.1 直通】" : "【电视模式 2.0 下混】"));
 
-        if (mLoadControl == null) {
-            mLoadControl = new DefaultLoadControl.Builder()
-                    // 关键参数调整：
-                    // 1. 最小缓冲线提至 40,000ms (40秒)：缓冲只要低于40秒就持续拉流，彻底杜绝跌入死锁
-                    // 2. 最大缓冲线设为 80,000ms (80秒)
-                    // 3. 起播缓冲 2.5 秒，卡顿重起缓冲 5 秒
-                    .setBufferDurationsMs(40_000, 80_000, 2_500, 5_000)
-                    // 扩容到 160MB (天猫魔盒 2G 内存可安全分配)
-                    .setTargetBufferBytes(160 * 1024 * 1024)
-                    // 优先保证时间阈值，维持平滑水流
-                    .setPrioritizeTimeOverSizeThresholds(true)
-                    .setBackBuffer(0, false)
-                    .build();
-        }
+        // 优化 LoadControl：拉大 20s~60s 回差，杜绝缓冲区边缘频繁启停抖动
+        mLoadControl = new DefaultLoadControl.Builder()
+                .setBufferDurationsMs(20_000, 60_000, 2_000, 4_000)
+                .setTargetBufferBytes(128 * 1024 * 1024)
+                .setPrioritizeTimeOverSizeThresholds(true)
+                .setBackBuffer(0, false)
+                .build();
 
         if (mTrackSelector == null) {
             DefaultTrackSelector defaultTrackSelector = new DefaultTrackSelector(mAppContext);
@@ -234,11 +228,11 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             trackSelector = (DefaultTrackSelector) mTrackSelector;
         }
         mInternalPlayer.addListener(this);
-        // === 注入 4K 卡顿与网速/硬解丢帧监控器 ===
+
+        // 监控器
         mInternalPlayer.addAnalyticsListener(new com.google.android.exoplayer2.analytics.AnalyticsListener() {
             @Override
             public void onDroppedVideoFrames(EventTime eventTime, int droppedFrames, long elapsedMs) {
-                // 当芯片处理不过来导致画面被抛弃时触发
                 writeDebugLog(mAppContext, "[硬解丢帧告警] 掉帧: " + droppedFrames + " 帧, 耗时=" + elapsedMs + "ms");
             }
 
@@ -249,7 +243,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             }
         });
 
-        // 启动定时器：每隔 2 秒记录一次核心状态心跳
         final Handler monitorHandler = new Handler(Looper.getMainLooper());
         monitorHandler.postDelayed(new Runnable() {
             @Override
@@ -268,6 +261,46 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     private RenderersFactory createCustomRenderersFactory(final boolean enableMultiChannel) {
         return new DefaultRenderersFactory(mAppContext) {
+            @Override
+            protected void buildVideoRenderers(
+                    Context context,
+                    int extensionRendererMode,
+                    MediaCodecSelector mediaCodecSelector,
+                    boolean enableDecoderFallback,
+                    Handler eventHandler,
+                    VideoRendererEventListener eventListener,
+                    long allowedVideoJoiningTimeMs,
+                    ArrayList<Renderer> out) {
+
+                writeDebugLog(context, "[buildVideoRenderers] 挂载防卡屏定制版 MediaCodecVideoRenderer...");
+
+                MediaCodecVideoRenderer videoRenderer = new MediaCodecVideoRenderer(
+                        context,
+                        mediaCodecSelector,
+                        allowedVideoJoiningTimeMs,
+                        enableDecoderFallback,
+                        eventHandler,
+                        eventListener,
+                        50) {
+
+                    @Override
+                    protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
+                        // 【核心修复 1】彻底禁用“落后500ms就狂丢整个GOP关键帧序列”的机制！消除10秒定格
+                        return false;
+                    }
+
+                    @Override
+                    protected boolean shouldDropOutputBuffer(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
+                        // 【核心修复 2】放宽单帧丢帧阈值：由默认 -30ms 放宽至 -120ms
+                        // 允许硬件解码轻微时钟波动，解码出的帧尽最大可能送显上屏，维持连续画面
+                        return earlyUs < -120_000 && !isLastBuffer;
+                    }
+                };
+
+                out.add(videoRenderer);
+                writeDebugLog(context, "[buildVideoRenderers] 定制视频渲染器装载成功！");
+            }
+
             @Override
             protected void buildAudioRenderers(
                     Context context,
@@ -307,7 +340,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     boolean enableAudioTrackPlaybackParams,
                     boolean enableOffload) {
 
-                // 功放模式允许 8 声道 PCM，电视模式锁定 2 声道 PCM
                 int maxChannels = enableMultiChannel ? 8 : 2;
                 AudioCapabilities pcmCapabilities = new AudioCapabilities(new int[]{C.ENCODING_PCM_16BIT}, maxChannels);
 
@@ -369,7 +401,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
-        // 规避 16 线程导致的 S912 内存总线拥堵与网盘限速断流
         if (path != null && path.contains("thread=16")) {
             path = path.replace("thread=16", "thread=6");
             writeDebugLog(mAppContext, "[并发优化] 检测到 16 线程请求，已自动优化为 6 线程以保护硬件总线");
@@ -563,7 +594,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED) {
 
-            // 若在功放多声道模式下遇到 AudioTrack 崩溃，自动切回电视立体声模式容灾
             if (isMultiChannelModeEnabled(mAppContext)) {
                 writeDebugLog(mAppContext, "[容灾生效] 功放模式声卡异常，自动切换回电视立体声模式！");
                 setMultiChannelModeEnabled(mAppContext, false);
@@ -632,11 +662,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
     }
 
-    /**
-     * 可开关的立体声下混音频处理器：
-     * 1. 功放模式 (enableMultiChannel = true)：全部声道直接直通（输出 5.1/7.1 LPCM）；
-     * 2. 电视模式 (enableMultiChannel = false)：多声道强制下混为 2.0 立体声输出。
-     */
     public static class SwitchableDownmixAudioProcessor extends BaseAudioProcessor {
         private final Context mContext;
         private final boolean mEnableMultiChannel;
@@ -658,13 +683,11 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 return AudioFormat.NOT_SET;
             }
 
-            // 功放模式：放行原生 5.1/7.1 PCM 直通
             if (mEnableMultiChannel) {
                 writeDebugLog(mContext, "[AudioProcessor] 【功放模式生效】放行原生 " + inputAudioFormat.channelCount + " 声道 PCM 直通！");
                 return AudioFormat.NOT_SET;
             }
 
-            // 电视模式：执行 ITU-R BS.775 下混
             writeDebugLog(mContext, "[AudioProcessor] 【电视模式生效】激活 ITU-R BS.775 下混: "
                     + inputAudioFormat.channelCount + " 声道 -> 2 声道输出");
             return new AudioFormat(inputAudioFormat.sampleRate, 2, C.ENCODING_PCM_16BIT);
