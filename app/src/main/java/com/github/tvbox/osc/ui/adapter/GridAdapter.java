@@ -10,7 +10,9 @@ import com.chad.library.adapter.base.BaseQuickAdapter;
 import com.chad.library.adapter.base.BaseViewHolder;
 import com.github.tvbox.osc.R;
 import com.github.tvbox.osc.bean.Movie;
+import com.github.tvbox.osc.util.HawkConfig;
 import com.github.tvbox.osc.util.ImgUtil;
+import com.orhanobut.hawk.Hawk;
 
 import java.util.ArrayList;
 
@@ -77,12 +79,27 @@ public class GridAdapter extends BaseQuickAdapter<Movie.Video, BaseViewHolder> {
         helper.setText(R.id.tvName, item.name);
         helper.setText(R.id.tvActor, item.actor);
         ImageView ivThumb = helper.getView(R.id.ivThumb);
+        
         int newWidth = ImgUtil.defaultWidth;
         int newHeight = ImgUtil.defaultHeight;
         if (style != null) {
             newWidth = defaultWidth;
             newHeight = (int) (newWidth / style.ratio);
+        } else {
+            // 根据大(5列)、中(6列)、小(7列)动态匹配卡片采样尺寸
+            int posterSize = Hawk.get(HawkConfig.POSTER_SIZE, 0);
+            if (posterSize == 1) { // 中 (6列)
+                newWidth = 176;
+                newHeight = 230;
+            } else if (posterSize == 2) { // 小图 (7列)
+                newWidth = 148;
+                newHeight = 194;
+            } else { // 大图 (5列，默认)
+                newWidth = 214;
+                newHeight = 280;
+            }
         }
+
         String pic = item.pic == null ? "" : item.pic.trim();
         if (!TextUtils.isEmpty(pic)) {
             if (ImgUtil.isBase64Image(pic)) {
@@ -104,13 +121,31 @@ public class GridAdapter extends BaseQuickAdapter<Movie.Video, BaseViewHolder> {
     }
 
     private void applyStyleToImage(final ImageView ivThumb) {
+        ViewGroup container = (ViewGroup) ivThumb.getParent();
+        if (container == null) return;
+
         if (style != null) {
-            ViewGroup container = (ViewGroup) ivThumb.getParent();
             int width = defaultWidth;
             int height = (int) (width / style.ratio);
             ViewGroup.LayoutParams containerParams = container.getLayoutParams();
             containerParams.height = AutoSizeUtils.mm2px(mContext, height);
             containerParams.width = AutoSizeUtils.mm2px(mContext, width);
+            container.setLayoutParams(containerParams);
+        } else {
+            // 依据设置动态拉伸/收缩海报 FrameLayout 容器
+            int posterSize = Hawk.get(HawkConfig.POSTER_SIZE, 0);
+            int width = 214;
+            int height = 280;
+            if (posterSize == 1) { // 中 (6列)
+                width = 176;
+                height = 230;
+            } else if (posterSize == 2) { // 小图 (7列)
+                width = 148;
+                height = 194;
+            }
+            ViewGroup.LayoutParams containerParams = container.getLayoutParams();
+            containerParams.width = AutoSizeUtils.mm2px(mContext, width);
+            containerParams.height = AutoSizeUtils.mm2px(mContext, height);
             container.setLayoutParams(containerParams);
         }
     }
