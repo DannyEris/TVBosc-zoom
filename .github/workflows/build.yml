@@ -24,6 +24,11 @@ on:
         options:
           - 'release'
           - 'debug'
+      include_source:
+        description: '是否打包源码 (Package Source Code Archive)'
+        required: true
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -58,11 +63,11 @@ jobs:
       - name: Determine Gradle Task
         id: gradle_task
         run: |
-          # 1. 提取选项开头的标识符 (例如从 "java32 (Java 32位 - armeabi-v7a)" 提取 "java32")
+          # 1. 提取选项开头的标识符
           RAW_FLAVOR="${{ github.event.inputs.flavor }}"
           FLAVOR=$(echo "$RAW_FLAVOR" | awk '{print $1}')
           
-          # 2. 转换编译类型首字母大写 (release -> Release, debug -> Debug)
+          # 2. 转换编译类型首字母大写
           TYPE="${{ github.event.inputs.build_type }}"
           TYPE_CAP="$(tr '[:lower:]' '[:upper:]' <<< ${TYPE:0:1})${TYPE:1}"
           
@@ -125,4 +130,19 @@ jobs:
         with:
           name: TVBox-${{ steps.gradle_task.outputs.flavor }}-${{ github.event.inputs.build_type }}
           path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+
+      - name: Archive Source Code
+        if: ${{ github.event.inputs.include_source == 'true' || github.event.inputs.include_source == true }}
+        run: |
+          mkdir -p output_source
+          # 使用 git archive 导出当前分支/提交的纯净源码，避免打包编译产生的中间文件和敏感签名
+          git archive --format=zip HEAD -o output_source/TVBox-source-${{ steps.gradle_task.outputs.flavor }}-${{ github.sha }}.zip
+
+      - name: Upload Source Code Artifact
+        if: ${{ github.event.inputs.include_source == 'true' || github.event.inputs.include_source == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: TVBox-source-${{ steps.gradle_task.outputs.flavor }}
+          path: output_source/*.zip
           if-no-files-found: error
