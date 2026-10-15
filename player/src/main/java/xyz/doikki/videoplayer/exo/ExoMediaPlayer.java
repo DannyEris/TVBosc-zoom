@@ -255,7 +255,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         // 4K 60fps 专属大水池配置：大幅提高后台预读水位，彻底消除断续卡顿感
         mLoadControl = new DefaultLoadControl.Builder()
                 .setBufferDurationsMs(20_000, 60_000, 2_500, 10_000)
-                .setTargetBufferBytes(128 * 1024 * 1024) // 显存缓冲扩容至 128MB
+                .setTargetBufferBytes(96 * 1024 * 1024) // 显存缓冲扩容至 96MB
                 .setPrioritizeTimeOverSizeThresholds(true)
                 .setBackBuffer(0, false)
                 .build();
