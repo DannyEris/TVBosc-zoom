@@ -101,7 +101,31 @@ public class App extends MultiDexApplication {
         if (!Hawk.contains(HawkConfig.POSTER_SIZE)) {
             Hawk.put(HawkConfig.POSTER_SIZE, 0);
         }
-        // =========================================================================
+        // ==================== 预置常用配置历史列表 ====================
+        if (!Hawk.get("init_history_v1", false)) {
+            ArrayList<String> defaultHistory = new ArrayList<>();
+            defaultHistory.add("http://new.王二小放牛娃.top");
+            defaultHistory.add("http://new.999888987.xyz");
+            defaultHistory.add("https://9280.kstore.vip/newwex.json");
+            defaultHistory.add("http://www.饭太硬.cc/tv");
+            defaultHistory.add("http://fty.xxooo.cf/tv");
+            defaultHistory.add("http://www.影视仓.com");
+            defaultHistory.add("https://700sjro44343.vicp.fun/240731/one/");
+            defaultHistory.add("http://肥猫.net/tv");
+            defaultHistory.add("http://hello.肥猫.net");
+            defaultHistory.add("http://枫斗.top/tv");
+
+            // 读取已有的历史列表并合并去重，防止冲掉用户自己曾经输入的
+            ArrayList<String> existingHistory = Hawk.get(HawkConfig.API_HISTORY, new ArrayList<String>());
+            for (String url : existingHistory) {
+                if (!defaultHistory.contains(url)) {
+                    defaultHistory.add(url);
+                }
+            }
+
+            Hawk.put(HawkConfig.API_HISTORY, defaultHistory);
+            Hawk.put("init_history_v1", true); // 标记已初始化，避免后续启动覆盖用户自己的删除
+        }
     }
 
     public static App getInstance() {
