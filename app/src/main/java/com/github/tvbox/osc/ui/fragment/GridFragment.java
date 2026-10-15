@@ -202,7 +202,13 @@ public class GridFragment extends BaseLazyFragment {
         if(isFolederMode()){
             mGridView.setLayoutManager(new V7LinearLayoutManager(this.mContext, 1, false));
         }else{
-            int spanCount = isBaseOnWidth() ? 5 : 6;
+            int posterSize = Hawk.get(HawkConfig.POSTER_SIZE, 0);
+            int spanCount = 5; // 默认大图: 5列
+            if (posterSize == 1) {
+                spanCount = 6; // 中: 6列
+            } else if (posterSize == 2) {
+                spanCount = 7; // 小图: 7列
+            }
             if (style != null) {
                 spanCount = ImgUtil.spanCountByStyle(style, spanCount);
             }
