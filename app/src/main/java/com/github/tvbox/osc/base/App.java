@@ -62,15 +62,39 @@ public class App extends MultiDexApplication {
     }
 
     private void initParams() {
-        // Hawk
+        // Hawk 键值存储初始化
         Hawk.init(this).build();
         Hawk.put(HawkConfig.DEBUG_OPEN, false);
         Hawk.put(HawkConfig.PLAYER_IS_LIVE, false);
+
+        // 默认播放器: ExoPlayer (2)
         if (!Hawk.contains(HawkConfig.PLAY_TYPE)) {
             Hawk.put(HawkConfig.PLAY_TYPE, 2);
         } else if (Hawk.get(HawkConfig.PLAY_TYPE, 2) == 0) {
             Hawk.put(HawkConfig.PLAY_TYPE, 2);
         }
+
+        // ==================== 定制默认设置（首次安装开箱即用）====================
+        // 1. 默认配置地址
+        if (!Hawk.contains(HawkConfig.API_URL) || Hawk.get(HawkConfig.API_URL, "").isEmpty()) {
+            Hawk.put(HawkConfig.API_URL, "http://new.王二小放牛娃.top");
+        }
+
+        // 2. 默认首页多行：是 (true)
+        if (!Hawk.contains(HawkConfig.HOME_REC_STYLE)) {
+            Hawk.put(HawkConfig.HOME_REC_STYLE, true);
+        }
+
+        // 3. 默认弹幕：关闭 (false)
+        if (!Hawk.contains(HawkConfig.DANMU_OPEN)) {
+            Hawk.put(HawkConfig.DANMU_OPEN, false);
+        }
+
+        // 4. 默认渲染方式：SurfaceView (0)
+        if (!Hawk.contains(HawkConfig.PLAY_RENDER)) {
+            Hawk.put(HawkConfig.PLAY_RENDER, 0); // 0 为 SurfaceView，1 为 TextureView
+        }
+        // =========================================================================
     }
 
     public static App getInstance() {
@@ -82,7 +106,6 @@ public class App extends MultiDexApplication {
         super.onTerminate();
         JsLoader.destroy();
     }
-
 
     private VodInfo vodInfo;
     public void setVodInfo(VodInfo vodinfo){
