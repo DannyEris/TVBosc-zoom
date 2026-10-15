@@ -90,9 +90,16 @@ public class App extends MultiDexApplication {
             Hawk.put(HawkConfig.DANMU_OPEN, false);
         }
 
-        // 4. 默认渲染方式：SurfaceView (0)
-        if (!Hawk.contains(HawkConfig.PLAY_RENDER)) {
-            Hawk.put(HawkConfig.PLAY_RENDER, 0); // 0 为 SurfaceView，1 为 TextureView
+        // 4. 默认渲染方式：SurfaceView (1)，带一次性纠偏逻辑
+        // 仅在首次运行本版本时将默认值纠正为 1 (SurfaceView)，之后完全尊重用户手动切换的设置
+        if (!Hawk.get("init_render_v2", false)) {
+            Hawk.put(HawkConfig.PLAY_RENDER, 1);      // 设为 SurfaceView (1)
+            Hawk.put("init_render_v2", true);         // 写入完成标记，以后启动绝不再次覆盖
+        }
+
+        // 5. 默认图片尺寸：大图 (0 - 5列)
+        if (!Hawk.contains(HawkConfig.POSTER_SIZE)) {
+            Hawk.put(HawkConfig.POSTER_SIZE, 0);
         }
         // =========================================================================
     }
