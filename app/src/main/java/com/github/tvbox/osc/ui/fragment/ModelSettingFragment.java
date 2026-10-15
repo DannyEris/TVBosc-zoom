@@ -79,6 +79,7 @@ public class ModelSettingFragment extends BaseLazyFragment {
     private TextView tvParseWebView;
     private TextView tvPlay;
     private TextView tvRender;
+    private TextView tvPosterSize;
     private TextView tvScale;
     private TextView tvApi;
     private TextView tvApiLine;
@@ -165,7 +166,9 @@ public class ModelSettingFragment extends BaseLazyFragment {
         tvHomeApi.setText(ApiConfig.get().getHomeSourceBean().getName());
         tvScale.setText(PlayerHelper.getScaleName(Hawk.get(HawkConfig.PLAY_SCALE, 0)));
         tvPlay.setText(PlayerHelper.getPlayerName(Hawk.get(HawkConfig.PLAY_TYPE, 2)));
-        tvRender.setText(PlayerHelper.getRenderName(Hawk.get(HawkConfig.PLAY_RENDER, 0)));
+        tvRender.setText(PlayerHelper.getRenderName(Hawk.get(HawkConfig.PLAY_RENDER, 1)));
+        tvPosterSize = findViewById(R.id.tvPosterSize);
+        tvPosterSize.setText(getPosterSizeName(Hawk.get(HawkConfig.POSTER_SIZE, 0)));
         tvIjkCachePlay.setText(Hawk.get(HawkConfig.IJK_CACHE_PLAY, false) ? "开启" : "关闭");
         tvHomeDefaultShow = findViewById(R.id.tvHomeText);
         tvHomeDefaultShow.setText(Hawk.get(HawkConfig.DEFAULT_LOAD_LIVE, false) ? "直播" : "点播");
@@ -576,7 +579,7 @@ public class ModelSettingFragment extends BaseLazyFragment {
             @Override
             public void onClick(View v) {
                 FastClickCheckUtil.check(v);
-                int defaultPos = Hawk.get(HawkConfig.PLAY_RENDER, 0);
+                int defaultPos = Hawk.get(HawkConfig.PLAY_RENDER, 1);
                 ArrayList<Integer> renders = new ArrayList<>();
                 renders.add(0);
                 renders.add(1);
@@ -605,6 +608,44 @@ public class ModelSettingFragment extends BaseLazyFragment {
                         return oldItem.intValue() == newItem.intValue();
                     }
                 }, renders, defaultPos);
+                dialog.show();
+            }
+        });
+        findViewById(R.id.llPosterSize).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                FastClickCheckUtil.check(v);
+                int defaultPos = Hawk.get(HawkConfig.POSTER_SIZE, 0);
+                ArrayList<Integer> sizes = new ArrayList<>();
+                sizes.add(0); // 大图(5列)
+                sizes.add(1); // 中/标准(6列)
+                sizes.add(2); // 小图(7列)
+                SelectDialog<Integer> dialog = new SelectDialog<>(mActivity);
+                dialog.setTip("请选择海报图片尺寸");
+                dialog.setAdapter(new SelectDialogAdapter.SelectDialogInterface<Integer>() {
+                    @Override
+                    public void click(Integer value, int pos) {
+                        Hawk.put(HawkConfig.POSTER_SIZE, value);
+                        tvPosterSize.setText(getPosterSizeName(value));
+                        // 发送通知，让主页及列表重刷网格
+                        EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_HOME_SOURCE_CHANGE));
+                    }
+
+                    @Override
+                    public String getDisplay(Integer val) {
+                        return getPosterSizeName(val);
+                    }
+                }, new DiffUtil.ItemCallback<Integer>() {
+                    @Override
+                    public boolean areItemsTheSame(@NonNull @NotNull Integer oldItem, @NonNull @NotNull Integer newItem) {
+                        return oldItem.intValue() == newItem.intValue();
+                    }
+
+                    @Override
+                    public boolean areContentsTheSame(@NonNull @NotNull Integer oldItem, @NonNull @NotNull Integer newItem) {
+                        return oldItem.intValue() == newItem.intValue();
+                    }
+                }, sizes, defaultPos);
                 dialog.show();
             }
         });
@@ -1108,6 +1149,15 @@ public class ModelSettingFragment extends BaseLazyFragment {
             return "文字列表";
         } else {
             return "缩略图";
+        }
+    }
+    String getPosterSizeName(int type) {
+        if (type == 1) {
+            return "中 (6列)";
+        } else if (type == 2) {
+            return "小 (7列)";
+        } else {
+            return "大 (5列)";
         }
     }
 }
