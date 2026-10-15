@@ -80,6 +80,7 @@ public class ModelSettingFragment extends BaseLazyFragment {
     private TextView tvPlay;
     private TextView tvRender;
     private TextView tvPosterSize;
+    private TextView tvHomePosterSize;
     private TextView tvScale;
     private TextView tvApi;
     private TextView tvApiLine;
@@ -627,6 +628,10 @@ public class ModelSettingFragment extends BaseLazyFragment {
                     public void click(Integer value, int pos) {
                         Hawk.put(HawkConfig.POSTER_SIZE, value);
                         tvPosterSize.setText(getPosterSizeName(value));
+                        tvHomePosterSize = findViewById(R.id.tvHomePosterSize);
+                        if (tvHomePosterSize != null) {
+                            tvHomePosterSize.setText(getHomePosterSizeName(Hawk.get(HawkConfig.HOME_POSTER_SIZE, 0)));
+                        }
                         // 发送通知，让主页及列表重刷网格
                         EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_HOME_SOURCE_CHANGE));
                     }
@@ -649,6 +654,48 @@ public class ModelSettingFragment extends BaseLazyFragment {
                 dialog.show();
             }
         });
+        View llHomePosterSize = findViewById(R.id.llHomePosterSize);
+        if (llHomePosterSize != null) {
+            llHomePosterSize.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    FastClickCheckUtil.check(v);
+                    int defaultPos = Hawk.get(HawkConfig.HOME_POSTER_SIZE, 0);
+                    ArrayList<Integer> sizes = new ArrayList<>();
+                    sizes.add(0); // 大 (5列)
+                    sizes.add(1); // 中 (6列)
+                    sizes.add(2); // 小 (7列)
+                    SelectDialog<Integer> dialog = new SelectDialog<>(mActivity);
+                    dialog.setTip("请选择首页海报图片尺寸");
+                    dialog.setAdapter(new SelectDialogAdapter.SelectDialogInterface<Integer>() {
+                        @Override
+                        public void click(Integer value, int pos) {
+                            Hawk.put(HawkConfig.HOME_POSTER_SIZE, value);
+                            if (tvHomePosterSize != null) {
+                                tvHomePosterSize.setText(getHomePosterSizeName(value));
+                            }
+                            EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_HOME_SOURCE_CHANGE));
+                        }
+
+                        @Override
+                        public String getDisplay(Integer val) {
+                            return getHomePosterSizeName(val);
+                        }
+                    }, new DiffUtil.ItemCallback<Integer>() {
+                        @Override
+                        public boolean areItemsTheSame(@NonNull @NotNull Integer oldItem, @NonNull @NotNull Integer newItem) {
+                            return oldItem.intValue() == newItem.intValue();
+                        }
+
+                        @Override
+                        public boolean areContentsTheSame(@NonNull @NotNull Integer oldItem, @NonNull @NotNull Integer newItem) {
+                            return oldItem.intValue() == newItem.intValue();
+                        }
+                    }, sizes, defaultPos);
+                    dialog.show();
+                }
+            });
+        }
         findViewById(R.id.llHomeRec).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -1152,6 +1199,15 @@ public class ModelSettingFragment extends BaseLazyFragment {
         }
     }
     String getPosterSizeName(int type) {
+        if (type == 1) {
+            return "中 (6列)";
+        } else if (type == 2) {
+            return "小 (7列)";
+        } else {
+            return "大 (5列)";
+        }
+    }
+    String getHomePosterSizeName(int type) {
         if (type == 1) {
             return "中 (6列)";
         } else if (type == 2) {
