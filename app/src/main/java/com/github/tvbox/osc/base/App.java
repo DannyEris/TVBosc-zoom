@@ -126,6 +126,10 @@ public class App extends MultiDexApplication {
             Hawk.put(HawkConfig.API_HISTORY, defaultHistory);
             Hawk.put("init_history_v1", true); // 标记已初始化，避免后续启动覆盖用户自己的删除
         }
+        // 默认首页图片尺寸：大图 (0 - 5列)
+        if (!Hawk.contains(HawkConfig.HOME_POSTER_SIZE)) {
+            Hawk.put(HawkConfig.HOME_POSTER_SIZE, 0);
+        }
     }
 
     public static App getInstance() {
