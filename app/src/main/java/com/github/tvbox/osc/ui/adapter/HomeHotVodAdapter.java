@@ -62,6 +62,19 @@ public class HomeHotVodAdapter extends BaseQuickAdapter<Movie.Video, BaseViewHol
         if (style != null) {
             newWidth = defaultWidth;
             newHeight = (int) (newWidth / style.ratio);
+        } else {
+            // 依据首页海报设置：0-大(5列), 1-中(6列), 2-小(7列)
+            int homePosterSize = Hawk.get(HawkConfig.HOME_POSTER_SIZE, 0);
+            if (homePosterSize == 1) { // 中 (6列)
+                newWidth = 176;
+                newHeight = 230;
+            } else if (homePosterSize == 2) { // 小 (7列)
+                newWidth = 148;
+                newHeight = 194;
+            } else { // 大 (5列)
+                newWidth = 214;
+                newHeight = 280;
+            }
         }
 
         String pic = item.pic == null ? "" : item.pic.trim();
@@ -78,13 +91,30 @@ public class HomeHotVodAdapter extends BaseQuickAdapter<Movie.Video, BaseViewHol
     }
 
     private void applyStyleToImage(final ImageView ivThumb) {
+        ViewGroup container = (ViewGroup) ivThumb.getParent();
+        if (container == null) return;
+
         if (style != null) {
-            ViewGroup container = (ViewGroup) ivThumb.getParent();
             int width = defaultWidth;
             int height = (int) (width / style.ratio);
             ViewGroup.LayoutParams containerParams = container.getLayoutParams();
             containerParams.height = AutoSizeUtils.mm2px(mContext, height);
             containerParams.width = AutoSizeUtils.mm2px(mContext, width);
+            container.setLayoutParams(containerParams);
+        } else {
+            int homePosterSize = Hawk.get(HawkConfig.HOME_POSTER_SIZE, 0);
+            int width = 214;
+            int height = 280;
+            if (homePosterSize == 1) { // 中 (6列)
+                width = 176;
+                height = 230;
+            } else if (homePosterSize == 2) { // 小 (7列)
+                width = 148;
+                height = 194;
+            }
+            ViewGroup.LayoutParams containerParams = container.getLayoutParams();
+            containerParams.width = AutoSizeUtils.mm2px(mContext, width);
+            containerParams.height = AutoSizeUtils.mm2px(mContext, height);
             container.setLayoutParams(containerParams);
         }
     }
