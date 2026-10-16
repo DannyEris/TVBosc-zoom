@@ -2361,6 +2361,10 @@ public class VodController extends BaseController {
                     || codecs.contains("dvav") || codecs.contains("dva1") || codecs.contains("dav1")) {
                 return "Dolby Vision";
             }
+            
+            if (mime.contains("edr") || codecs.contains("edr")) {
+                return "EDR";
+            }
 
             // HDR10 / HLG 判断
             if (format.colorInfo != null) {
@@ -2420,6 +2424,9 @@ public class VodController extends BaseController {
             if (upper.contains("DOLBY VISION") || upper.contains("DOVI") || upper.contains("杜比视界")
                     || upper.contains(".DV.") || upper.contains("-DV-") || upper.contains(" DV ")) {
                 return "Dolby Vision";
+            }
+            if (upper.contains("EDR") || upper.contains("增强动态范围")) {
+                return "EDR";
             }
             if (upper.contains("HDR10+") || upper.contains("HDR10PLUS")) {
                 return "HDR10+";
