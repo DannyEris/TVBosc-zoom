@@ -254,6 +254,9 @@ public class VodController extends BaseController {
     TextView mVideoSize;
     LinearLayout mTopCenterContainer;
     TextView mVideoFormatInfo;
+    private int lastRenderedFrameCount = -1;
+    private long lastFrameCalcTime = 0;
+    private String lastCalculatedFps = "";
     public SimpleSubtitleView mSubtitleView;
     public SimpleSubtitleView mLyricView;
     public SubtitleView mExoSubtitleView;
@@ -2265,7 +2268,7 @@ public class VodController extends BaseController {
             return (int) (value * context.getResources().getDisplayMetrics().density + 0.5f);
         }
     }
-    // ==================== 顶部实时视频流信息提取 (格式/帧率/码率) ====================
+    // ==================== 顶部实时视频流信息提取 (格式/物理出帧FPS/真实码率) ====================
     private void updateVideoFormatInfo() {
         if (mVideoFormatInfo == null) return;
         if (mTopCenterContainer != null && mTopCenterContainer.getVisibility() != VISIBLE) return;
@@ -2279,12 +2282,13 @@ public class VodController extends BaseController {
             if (player != null) {
                 String className = player.getClass().getName();
                 if (className.contains("Exo") || className.contains("exo")) {
-                    // 1. ExoPlayer 内核提取
+                    Object exo = getExoPlayerInstance(player);
                     Object formatObj = getExoVideoFormat(player);
+
                     if (formatObj != null) {
                         formatStr = parseExoColorFormat(formatObj);
 
-                        // 提取帧率
+                        // 1. 尝试从流元数据读取静态标称帧率
                         try {
                             java.lang.reflect.Field fpsField = formatObj.getClass().getField("frameRate");
                             float fps = fpsField.getFloat(formatObj);
@@ -2293,21 +2297,70 @@ public class VodController extends BaseController {
                             }
                         } catch (Throwable ignored) {}
 
-                        // 提取码率
+                        // 2. 尝试从流元数据读取码率（无假网速混充）
+                        long bitrateVal = -1;
                         try {
                             java.lang.reflect.Field bitrateField = formatObj.getClass().getField("bitrate");
-                            int bitrate = bitrateField.getInt(formatObj);
-                            if (bitrate <= 0) {
-                                java.lang.reflect.Field peakBitrateField = formatObj.getClass().getField("peakBitrate");
-                                bitrate = peakBitrateField.getInt(formatObj);
-                            }
-                            if (bitrate > 0) {
-                                bitrateStr = String.format(Locale.US, "%.1f Mbps", bitrate / 1000000.0f);
+                            bitrateVal = bitrateField.getInt(formatObj);
+                        } catch (Throwable ignored) {}
+                        if (bitrateVal <= 0) {
+                            try {
+                                java.lang.reflect.Field avgField = formatObj.getClass().getField("averageBitrate");
+                                bitrateVal = avgField.getInt(formatObj);
+                            } catch (Throwable ignored) {}
+                        }
+                        if (bitrateVal <= 0) {
+                            try {
+                                java.lang.reflect.Field peakField = formatObj.getClass().getField("peakBitrate");
+                                bitrateVal = peakField.getInt(formatObj);
+                            } catch (Throwable ignored) {}
+                        }
+                        if (bitrateVal > 0) {
+                            bitrateStr = String.format(Locale.US, "%.1f Mbps", bitrateVal / 1000000.0f);
+                        }
+                    }
+
+                    // 3. 动态物理出帧帧率探测（解决 M3U8/TS 无帧率标签导致 FPS 不显示的问题）
+                    if (exo != null) {
+                        try {
+                            java.lang.reflect.Method mc = exo.getClass().getMethod("getVideoDecoderCounters");
+                            Object counters = mc.invoke(exo);
+                            if (counters != null) {
+                                java.lang.reflect.Field rf = counters.getClass().getField("renderedOutputBufferCount");
+                                int renderedFrames = rf.getInt(counters);
+                                long now = System.currentTimeMillis();
+                                if (lastRenderedFrameCount >= 0 && now > lastFrameCalcTime) {
+                                    int diffFrames = renderedFrames - lastRenderedFrameCount;
+                                    long diffTime = now - lastFrameCalcTime;
+                                    if (diffTime >= 800 && diffFrames > 0) {
+                                        float calcFps = (diffFrames * 1000f) / diffTime;
+                                        if (calcFps >= 10 && calcFps <= 144) {
+                                            int roundFps = Math.round(calcFps);
+                                            if (Math.abs(calcFps - 24) < 1.2f) roundFps = 24;
+                                            else if (Math.abs(calcFps - 25) < 1.0f) roundFps = 25;
+                                            else if (Math.abs(calcFps - 30) < 1.2f) roundFps = 30;
+                                            else if (Math.abs(calcFps - 50) < 1.5f) roundFps = 50;
+                                            else if (Math.abs(calcFps - 60) < 1.8f) roundFps = 60;
+                                            lastCalculatedFps = roundFps + " FPS";
+                                        }
+                                        lastRenderedFrameCount = renderedFrames;
+                                        lastFrameCalcTime = now;
+                                    } else if (diffTime >= 800 && diffFrames == 0) {
+                                        // 暂停或缓冲中保留上一帧率显示
+                                        lastFrameCalcTime = now;
+                                    }
+                                } else {
+                                    lastRenderedFrameCount = renderedFrames;
+                                    lastFrameCalcTime = now;
+                                }
+                                if (!TextUtils.isEmpty(lastCalculatedFps)) {
+                                    fpsStr = lastCalculatedFps;
+                                }
                             }
                         } catch (Throwable ignored) {}
                     }
                 } else if (className.contains("Ijk") || className.contains("ijk")) {
-                    // 2. IjkPlayer 内核提取
+                    // IjkPlayer 内核提取
                     try {
                         java.lang.reflect.Method fpsMethod = player.getClass().getMethod("getVideoOutputFramesPerSecond");
                         float fps = (Float) fpsMethod.invoke(player);
@@ -2315,16 +2368,14 @@ public class VodController extends BaseController {
                             fpsStr = Math.round(fps) + " FPS";
                         }
                     } catch (Throwable ignored) {}
+                    try {
+                        java.lang.reflect.Method brMethod = player.getClass().getMethod("getBitRate");
+                        long br = (Long) brMethod.invoke(player);
+                        if (br > 0) {
+                            bitrateStr = String.format(Locale.US, "%.1f Mbps", br / 1000000.0f);
+                        }
+                    } catch (Throwable ignored) {}
                     formatStr = "SDR";
-                }
-            }
-
-            // 码率兜底：若流元数据中未包含码率，使用实时下载总线吞吐计算
-            if (TextUtils.isEmpty(bitrateStr) && mControlWrapper != null) {
-                long mSpeed = mControlWrapper.getTcpSpeed();
-                if (mSpeed > 0) {
-                    float mbps = (mSpeed * 8f) / 1000000.0f;
-                    bitrateStr = String.format(Locale.US, "%.1f Mbps", mbps);
                 }
             }
 
@@ -2349,27 +2400,32 @@ public class VodController extends BaseController {
             if (mControlWrapper != null) {
                 Class<?> clazz = mControlWrapper.getClass();
                 while (clazz != null && clazz != Object.class) {
-                    try {
-                        java.lang.reflect.Field f = clazz.getDeclaredField("mPlayer");
-                        f.setAccessible(true);
-                        Object vv = f.get(mControlWrapper);
-                        if (vv != null) {
-                            Class<?> vClazz = vv.getClass();
-                            while (vClazz != null && vClazz != Object.class) {
-                                try {
-                                    java.lang.reflect.Field mf = vClazz.getDeclaredField("mMediaPlayer");
-                                    mf.setAccessible(true);
-                                    absPlayer = mf.get(vv);
+                    for (java.lang.reflect.Field f : clazz.getDeclaredFields()) {
+                        try {
+                            f.setAccessible(true);
+                            Object val = f.get(mControlWrapper);
+                            if (val != null && val.getClass().getName().contains("VideoView")) {
+                                Class<?> vClazz = val.getClass();
+                                while (vClazz != null && vClazz != Object.class) {
+                                    for (java.lang.reflect.Field mf : vClazz.getDeclaredFields()) {
+                                        try {
+                                            mf.setAccessible(true);
+                                            Object pv = mf.get(val);
+                                            if (pv != null && (pv.getClass().getName().contains("Player") || pv.getClass().getName().contains("player"))) {
+                                                absPlayer = pv;
+                                                break;
+                                            }
+                                        } catch (Throwable ignored) {}
+                                    }
                                     if (absPlayer != null) break;
-                                } catch (NoSuchFieldException ignored) {
                                     vClazz = vClazz.getSuperclass();
                                 }
                             }
-                        }
+                        } catch (Throwable ignored) {}
                         if (absPlayer != null) break;
-                    } catch (NoSuchFieldException ignored) {
-                        clazz = clazz.getSuperclass();
                     }
+                    if (absPlayer != null) break;
+                    clazz = clazz.getSuperclass();
                 }
             }
             if (absPlayer == null && mActivity != null) {
@@ -2377,14 +2433,18 @@ public class VodController extends BaseController {
                 if (vv != null) {
                     Class<?> vClazz = vv.getClass();
                     while (vClazz != null && vClazz != Object.class) {
-                        try {
-                            java.lang.reflect.Field mf = vClazz.getDeclaredField("mMediaPlayer");
-                            mf.setAccessible(true);
-                            absPlayer = mf.get(vv);
-                            if (absPlayer != null) break;
-                        } catch (NoSuchFieldException ignored) {
-                            vClazz = vClazz.getSuperclass();
+                        for (java.lang.reflect.Field mf : vClazz.getDeclaredFields()) {
+                            try {
+                                mf.setAccessible(true);
+                                Object pv = mf.get(vv);
+                                if (pv != null && (pv.getClass().getName().contains("Player") || pv.getClass().getName().contains("player"))) {
+                                    absPlayer = pv;
+                                    break;
+                                }
+                            } catch (Throwable ignored) {}
                         }
+                        if (absPlayer != null) break;
+                        vClazz = vClazz.getSuperclass();
                     }
                 }
             }
@@ -2394,21 +2454,27 @@ public class VodController extends BaseController {
         }
     }
 
+    private Object getExoPlayerInstance(Object absPlayer) {
+        if (absPlayer == null) return null;
+        Class<?> clazz = absPlayer.getClass();
+        while (clazz != null && clazz != Object.class) {
+            for (java.lang.reflect.Field f : clazz.getDeclaredFields()) {
+                try {
+                    f.setAccessible(true);
+                    Object val = f.get(absPlayer);
+                    if (val != null && (val.getClass().getName().contains("ExoPlayer") || val.getClass().getName().contains("SimpleExoPlayer"))) {
+                        return val;
+                    }
+                } catch (Throwable ignored) {}
+            }
+            clazz = clazz.getSuperclass();
+        }
+        return null;
+    }
+
     private Object getExoVideoFormat(Object absPlayer) {
         try {
-            Object exo = null;
-            Class<?> clazz = absPlayer.getClass();
-            while (clazz != null && clazz != Object.class) {
-                for (java.lang.reflect.Field f : clazz.getDeclaredFields()) {
-                    if (f.getType().getName().contains("ExoPlayer") || f.getType().getName().contains("SimpleExoPlayer")) {
-                        f.setAccessible(true);
-                        exo = f.get(absPlayer);
-                        if (exo != null) break;
-                    }
-                }
-                if (exo != null) break;
-                clazz = clazz.getSuperclass();
-            }
+            Object exo = getExoPlayerInstance(absPlayer);
             if (exo == null) return null;
             java.lang.reflect.Method m = exo.getClass().getMethod("getVideoFormat");
             return m.invoke(exo);
@@ -2445,4 +2511,3 @@ public class VodController extends BaseController {
         } catch (Throwable ignored) {}
         return "SDR";
     }
-}
