@@ -203,12 +203,15 @@ public class SearchActivity extends BaseActivity {
             }
         });
         mGridView.setHasFixedSize(true);
-        // lite
-        if (Hawk.get(HawkConfig.SEARCH_VIEW, 0) == 0)
+        int searchViewMode = Hawk.get(HawkConfig.SEARCH_VIEW, 0);
+        if (searchViewMode == 0) {
             mGridView.setLayoutManager(new V7LinearLayoutManager(this.mContext, 1, false));
-            // with preview
-        else
-            mGridView.setLayoutManager(new V7GridLayoutManager(this.mContext, 3));
+        } else {
+            int spanCount = 4;
+            if (searchViewMode == 2) spanCount = 5;
+            else if (searchViewMode == 3) spanCount = 6;
+            mGridView.setLayoutManager(new V7GridLayoutManager(this.mContext, spanCount));
+        }
         searchAdapter = new SearchAdapter();
         mGridView.setAdapter(searchAdapter);
         searchAdapter.setOnItemClickListener(new BaseQuickAdapter.OnItemClickListener() {
