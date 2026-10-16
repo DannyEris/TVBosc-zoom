@@ -119,6 +119,7 @@ public class VodController extends BaseController {
                         mBottomRoot.setVisibility(VISIBLE);
                         mTopRoot1.setVisibility(VISIBLE);
                         mTopRoot2.setVisibility(VISIBLE);
+                        if (mTopCenterContainer != null) mTopCenterContainer.setVisibility(VISIBLE);
                         mPlayLoadNetSpeedRightTop.setVisibility(VISIBLE);
                         if(Hawk.get(HawkConfig.SCREEN_DISPLAY,GONE)==GONE){
                             mPlayPauseTime.setVisibility(VISIBLE);
@@ -133,6 +134,9 @@ public class VodController extends BaseController {
                     case 1003: { // 隐藏底部菜单
                         mBottomRoot.setVisibility(GONE);
                         mTopRoot1.setVisibility(GONE);
+                        if (mTopCenterContainer != null) {
+                            mTopCenterContainer.setVisibility(Hawk.get(HawkConfig.SCREEN_DISPLAY, GONE) == VISIBLE ? VISIBLE : GONE);
+                        }
                         mPlayLoadNetSpeedRightTop.setVisibility(GONE);
                         if (videoPlayState == VideoView.STATE_PAUSED) {
                             showPauseRoot();
@@ -247,6 +251,8 @@ public class VodController extends BaseController {
     TextView mPlayPauseTime;
     TextView mPlayLoadNetSpeed;
     TextView mVideoSize;
+    LinearLayout mTopCenterContainer;
+    TextView mVideoFormatInfo;
     public SimpleSubtitleView mSubtitleView;
     public SimpleSubtitleView mLyricView;
     public SubtitleView mExoSubtitleView;
@@ -292,6 +298,8 @@ public class VodController extends BaseController {
             String width = Integer.toString(mVideoSizes[0]);
             String height = Integer.toString(mVideoSizes[1]);
             mVideoSize.setText(width + " X " + height);
+
+            updateVideoFormatInfo(); // 实时计算格式、帧率与码率
 
             mHandler.postDelayed(this, 1000);
         }
@@ -366,6 +374,8 @@ public class VodController extends BaseController {
         mPlayPauseTime = findViewById(R.id.tv_sys_time);
         mPlayLoadNetSpeed = findViewById(R.id.tv_play_load_net_speed);
         mVideoSize = findViewById(R.id.tv_videosize);
+        mTopCenterContainer = findViewById(R.id.tv_top_c_container);
+        mVideoFormatInfo = findViewById(R.id.tv_video_format_info);
         mSubtitleView = findViewById(R.id.subtitle_view);
         mLyricView = findViewById(R.id.lyric_view);
         mExoSubtitleView = findViewById(R.id.exo_subtitle_view);
@@ -379,6 +389,9 @@ public class VodController extends BaseController {
         seekTime = findViewById(R.id.tv_seek_time);
         mScreenDisplay = findViewById(R.id.screen_display);
         mCastBtn = findViewById(R.id.play_cast);
+        if (mTopCenterContainer != null) {
+            mTopCenterContainer.setVisibility(Hawk.get(HawkConfig.SCREEN_DISPLAY, GONE));
+        }
         updateDanmuBtn();
         updateDanmuSearchUiBtn();
         backBtn.setOnClickListener(new OnClickListener() {
@@ -927,6 +940,7 @@ public class VodController extends BaseController {
                 seekTime.setVisibility(disPlay);
                 net_play_speed.setVisibility(disPlay);
                 if(disPlay==VISIBLE)mPlayPauseTime.setVisibility(disPlay);
+                if (mTopCenterContainer != null) mTopCenterContainer.setVisibility(disPlay);
                 Hawk.put(HawkConfig.SCREEN_DISPLAY, disPlay);
                 mScreenDisplay.setTextColor(disPlay==VISIBLE?getResources().getColor(R.color.color_02F8E1): Color.WHITE);
                 hideBottom();
@@ -1180,6 +1194,7 @@ public class VodController extends BaseController {
     private void updatePortraitMenu(boolean isPortrait) {
         if (isPortrait) {
             mParseRoot.setVisibility(GONE);
+            if (mTopCenterContainer != null) mTopCenterContainer.setVisibility(GONE);
             mPlayLabel.setVisibility(GONE);
             mPlayrefresh.setVisibility(GONE);
             mPlayerScaleBtn.setVisibility(GONE);
@@ -2248,5 +2263,185 @@ public class VodController extends BaseController {
         private static int dp(Context context, float value) {
             return (int) (value * context.getResources().getDisplayMetrics().density + 0.5f);
         }
+    }
+    // ==================== 顶部实时视频流信息提取 (格式/帧率/码率) ====================
+    private void updateVideoFormatInfo() {
+        if (mVideoFormatInfo == null) return;
+        if (mTopCenterContainer != null && mTopCenterContainer.getVisibility() != VISIBLE) return;
+
+        try {
+            String formatStr = "SDR";
+            String fpsStr = "";
+            String bitrateStr = "";
+
+            Object player = getUnderlyingPlayer();
+            if (player != null) {
+                String className = player.getClass().getName();
+                if (className.contains("Exo") || className.contains("exo")) {
+                    // 1. ExoPlayer 内核提取
+                    Object formatObj = getExoVideoFormat(player);
+                    if (formatObj != null) {
+                        formatStr = parseExoColorFormat(formatObj);
+
+                        // 提取帧率
+                        try {
+                            java.lang.reflect.Field fpsField = formatObj.getClass().getField("frameRate");
+                            float fps = fpsField.getFloat(formatObj);
+                            if (fps > 0) {
+                                fpsStr = Math.round(fps) + " FPS";
+                            }
+                        } catch (Throwable ignored) {}
+
+                        // 提取码率
+                        try {
+                            java.lang.reflect.Field bitrateField = formatObj.getClass().getField("bitrate");
+                            int bitrate = bitrateField.getInt(formatObj);
+                            if (bitrate <= 0) {
+                                java.lang.reflect.Field peakBitrateField = formatObj.getClass().getField("peakBitrate");
+                                bitrate = peakBitrateField.getInt(formatObj);
+                            }
+                            if (bitrate > 0) {
+                                bitrateStr = String.format(Locale.US, "%.1f Mbps", bitrate / 1000000.0f);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                } else if (className.contains("Ijk") || className.contains("ijk")) {
+                    // 2. IjkPlayer 内核提取
+                    try {
+                        java.lang.reflect.Method fpsMethod = player.getClass().getMethod("getVideoOutputFramesPerSecond");
+                        float fps = (Float) fpsMethod.invoke(player);
+                        if (fps > 0) {
+                            fpsStr = Math.round(fps) + " FPS";
+                        }
+                    } catch (Throwable ignored) {}
+                    formatStr = "SDR";
+                }
+            }
+
+            // 码率兜底：若流元数据中未包含码率，使用实时下载总线吞吐计算
+            if (TextUtils.isEmpty(bitrateStr) && mControlWrapper != null) {
+                long mSpeed = mControlWrapper.getTcpSpeed();
+                if (mSpeed > 0) {
+                    float mbps = (mSpeed * 8f) / 1000000.0f;
+                    bitrateStr = String.format(Locale.US, "%.1f Mbps", mbps);
+                }
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.append(formatStr);
+            if (!TextUtils.isEmpty(fpsStr)) {
+                sb.append("  ·  ").append(fpsStr);
+            }
+            if (!TextUtils.isEmpty(bitrateStr)) {
+                sb.append("  ·  ").append(bitrateStr);
+            }
+
+            mVideoFormatInfo.setText(sb.toString());
+        } catch (Throwable th) {
+            th.printStackTrace();
+        }
+    }
+
+    private Object getUnderlyingPlayer() {
+        try {
+            Object absPlayer = null;
+            if (mControlWrapper != null) {
+                Class<?> clazz = mControlWrapper.getClass();
+                while (clazz != null && clazz != Object.class) {
+                    try {
+                        java.lang.reflect.Field f = clazz.getDeclaredField("mPlayer");
+                        f.setAccessible(true);
+                        Object vv = f.get(mControlWrapper);
+                        if (vv != null) {
+                            Class<?> vClazz = vv.getClass();
+                            while (vClazz != null && vClazz != Object.class) {
+                                try {
+                                    java.lang.reflect.Field mf = vClazz.getDeclaredField("mMediaPlayer");
+                                    mf.setAccessible(true);
+                                    absPlayer = mf.get(vv);
+                                    if (absPlayer != null) break;
+                                } catch (NoSuchFieldException ignored) {
+                                    vClazz = vClazz.getSuperclass();
+                                }
+                            }
+                        }
+                        if (absPlayer != null) break;
+                    } catch (NoSuchFieldException ignored) {
+                        clazz = clazz.getSuperclass();
+                    }
+                }
+            }
+            if (absPlayer == null && mActivity != null) {
+                View vv = mActivity.findViewById(R.id.mVideoView);
+                if (vv != null) {
+                    Class<?> vClazz = vv.getClass();
+                    while (vClazz != null && vClazz != Object.class) {
+                        try {
+                            java.lang.reflect.Field mf = vClazz.getDeclaredField("mMediaPlayer");
+                            mf.setAccessible(true);
+                            absPlayer = mf.get(vv);
+                            if (absPlayer != null) break;
+                        } catch (NoSuchFieldException ignored) {
+                            vClazz = vClazz.getSuperclass();
+                        }
+                    }
+                }
+            }
+            return absPlayer;
+        } catch (Throwable th) {
+            return null;
+        }
+    }
+
+    private Object getExoVideoFormat(Object absPlayer) {
+        try {
+            Object exo = null;
+            Class<?> clazz = absPlayer.getClass();
+            while (clazz != null && clazz != Object.class) {
+                for (java.lang.reflect.Field f : clazz.getDeclaredFields()) {
+                    if (f.getType().getName().contains("ExoPlayer") || f.getType().getName().contains("SimpleExoPlayer")) {
+                        f.setAccessible(true);
+                        exo = f.get(absPlayer);
+                        if (exo != null) break;
+                    }
+                }
+                if (exo != null) break;
+                clazz = clazz.getSuperclass();
+            }
+            if (exo == null) return null;
+            java.lang.reflect.Method m = exo.getClass().getMethod("getVideoFormat");
+            return m.invoke(exo);
+        } catch (Throwable th) {
+            return null;
+        }
+    }
+
+    private String parseExoColorFormat(Object formatObj) {
+        try {
+            java.lang.reflect.Field mimeField = formatObj.getClass().getField("sampleMimeType");
+            String mime = (String) mimeField.get(formatObj);
+            java.lang.reflect.Field codecsField = formatObj.getClass().getField("codecs");
+            String codecs = (String) codecsField.get(formatObj);
+            if ((mime != null && (mime.contains("dolby") || mime.contains("dvhe") || mime.contains("dvh1")))
+                    || (codecs != null && (codecs.startsWith("dvh") || codecs.startsWith("dvav")))) {
+                return "Dolby Vision";
+            }
+
+            java.lang.reflect.Field colorInfoField = formatObj.getClass().getField("colorInfo");
+            Object colorInfo = colorInfoField.get(formatObj);
+            if (colorInfo != null) {
+                java.lang.reflect.Field transferField = colorInfo.getClass().getField("colorTransfer");
+                int transfer = transferField.getInt(colorInfo);
+                java.lang.reflect.Field spaceField = colorInfo.getClass().getField("colorSpace");
+                int space = spaceField.getInt(colorInfo);
+
+                if (transfer == 7) {
+                    return "HLG";
+                } else if (transfer == 6 || space == 6) {
+                    return "HDR10";
+                }
+            }
+        } catch (Throwable ignored) {}
+        return "SDR";
     }
 }
