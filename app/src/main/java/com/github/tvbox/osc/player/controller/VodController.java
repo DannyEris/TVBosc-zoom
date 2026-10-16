@@ -2268,7 +2268,7 @@ public class VodController extends BaseController {
             return (int) (value * context.getResources().getDisplayMetrics().density + 0.5f);
         }
     }
-    // ==================== 顶部实时视频流信息提取 (格式/物理出帧FPS/真实码率) ====================
+    // ==================== 顶部视频流信息提取 (格式/出帧FPS/码率) ====================
     private void updateVideoFormatInfo() {
         if (mVideoFormatInfo == null) return;
         if (mTopCenterContainer != null && mTopCenterContainer.getVisibility() != VISIBLE) return;
@@ -2286,9 +2286,10 @@ public class VodController extends BaseController {
                     Object formatObj = getExoVideoFormat(player);
 
                     if (formatObj != null) {
+                        // 1. 精准提取色彩格式 (Dolby Vision / HDR10+ / HDR10 / HLG / SDR)
                         formatStr = parseExoColorFormat(formatObj);
 
-                        // 1. 尝试从流元数据读取静态标称帧率
+                        // 尝试从元数据读取帧率
                         try {
                             java.lang.reflect.Field fpsField = formatObj.getClass().getField("frameRate");
                             float fps = fpsField.getFloat(formatObj);
@@ -2297,7 +2298,7 @@ public class VodController extends BaseController {
                             }
                         } catch (Throwable ignored) {}
 
-                        // 2. 尝试从流元数据读取码率（无假网速混充）
+                        // 尝试从元数据读取真实码率
                         long bitrateVal = -1;
                         try {
                             java.lang.reflect.Field bitrateField = formatObj.getClass().getField("bitrate");
@@ -2320,7 +2321,7 @@ public class VodController extends BaseController {
                         }
                     }
 
-                    // 3. 动态物理出帧帧率探测（解决 M3U8/TS 无帧率标签导致 FPS 不显示的问题）
+                    // 2. 物理渲染出帧 FPS 动态计算
                     if (exo != null) {
                         try {
                             java.lang.reflect.Method mc = exo.getClass().getMethod("getVideoDecoderCounters");
@@ -2346,7 +2347,6 @@ public class VodController extends BaseController {
                                         lastRenderedFrameCount = renderedFrames;
                                         lastFrameCalcTime = now;
                                     } else if (diffTime >= 800 && diffFrames == 0) {
-                                        // 暂停或缓冲中保留上一帧率显示
                                         lastFrameCalcTime = now;
                                     }
                                 } else {
@@ -2360,7 +2360,9 @@ public class VodController extends BaseController {
                         } catch (Throwable ignored) {}
                     }
                 } else if (className.contains("Ijk") || className.contains("ijk")) {
-                    // IjkPlayer 内核提取
+                    // IjkPlayer 真实色彩与帧率提取
+                    formatStr = parseIjkColorFormat(player);
+
                     try {
                         java.lang.reflect.Method fpsMethod = player.getClass().getMethod("getVideoOutputFramesPerSecond");
                         float fps = (Float) fpsMethod.invoke(player);
@@ -2368,6 +2370,7 @@ public class VodController extends BaseController {
                             fpsStr = Math.round(fps) + " FPS";
                         }
                     } catch (Throwable ignored) {}
+
                     try {
                         java.lang.reflect.Method brMethod = player.getClass().getMethod("getBitRate");
                         long br = (Long) brMethod.invoke(player);
@@ -2375,8 +2378,12 @@ public class VodController extends BaseController {
                             bitrateStr = String.format(Locale.US, "%.1f Mbps", br / 1000000.0f);
                         }
                     } catch (Throwable ignored) {}
-                    formatStr = "SDR";
                 }
+            }
+
+            // 若底层均未识别出 HDR，通过播放片名进行智能识别兜底
+            if ("SDR".equals(formatStr)) {
+                formatStr = parseTitleColorFallback();
             }
 
             StringBuilder sb = new StringBuilder();
@@ -2483,17 +2490,31 @@ public class VodController extends BaseController {
         }
     }
 
+    // 严谨的 ExoPlayer 色彩空间与动态范围判断
     private String parseExoColorFormat(Object formatObj) {
         try {
-            java.lang.reflect.Field mimeField = formatObj.getClass().getField("sampleMimeType");
-            String mime = (String) mimeField.get(formatObj);
-            java.lang.reflect.Field codecsField = formatObj.getClass().getField("codecs");
-            String codecs = (String) codecsField.get(formatObj);
-            if ((mime != null && (mime.contains("dolby") || mime.contains("dvhe") || mime.contains("dvh1")))
-                    || (codecs != null && (codecs.startsWith("dvh") || codecs.startsWith("dvav")))) {
+            String mime = "";
+            String codecs = "";
+            try {
+                java.lang.reflect.Field mimeField = formatObj.getClass().getField("sampleMimeType");
+                Object m = mimeField.get(formatObj);
+                if (m != null) mime = m.toString().toLowerCase(Locale.US);
+            } catch (Throwable ignored) {}
+
+            try {
+                java.lang.reflect.Field codecsField = formatObj.getClass().getField("codecs");
+                Object c = codecsField.get(formatObj);
+                if (c != null) codecs = c.toString().toLowerCase(Locale.US);
+            } catch (Throwable ignored) {}
+
+            // 1. 杜比视界判断 (全小写兼容，覆盖 dvhe, dvh1, dvav, dva1, dav1)
+            if (mime.contains("dolby") || mime.contains("dvh1") || mime.contains("dvhe")
+                    || codecs.contains("dvh1") || codecs.contains("dvhe")
+                    || codecs.contains("dvav") || codecs.contains("dva1") || codecs.contains("dav1")) {
                 return "Dolby Vision";
             }
 
+            // 2. ColorInfo 真实光电转换参数判断
             java.lang.reflect.Field colorInfoField = formatObj.getClass().getField("colorInfo");
             Object colorInfo = colorInfoField.get(formatObj);
             if (colorInfo != null) {
@@ -2502,11 +2523,83 @@ public class VodController extends BaseController {
                 java.lang.reflect.Field spaceField = colorInfo.getClass().getField("colorSpace");
                 int space = spaceField.getInt(colorInfo);
 
+                // ARIB STD-B67 -> HLG
                 if (transfer == 7) {
                     return "HLG";
-                } else if (transfer == 6 || space == 6) {
+                }
+                // SMPTE ST 2084 (PQ) -> HDR10
+                if (transfer == 6) {
                     return "HDR10";
                 }
+
+                // 检查 ST 2086 静态元数据 (Mastering Display Color Volume)
+                try {
+                    java.lang.reflect.Field staticField = colorInfo.getClass().getField("hdrStaticInfo");
+                    byte[] hdrStaticInfo = (byte[]) staticField.get(colorInfo);
+                    if (hdrStaticInfo != null && hdrStaticInfo.length > 0) {
+                        return "HDR10";
+                    }
+                } catch (Throwable ignored) {}
+
+                // 色域为 BT.2020 且光电转换非 SDR 时的补丁判断
+                if (space == 6 && transfer != 3 && transfer != 1) { // 3: SDR, 1: BT709
+                    return "HDR10";
+                }
+            }
+        } catch (Throwable ignored) {}
+        return "SDR";
+    }
+
+    // 严谨的 IjkPlayer 色彩提取
+    private String parseIjkColorFormat(Object player) {
+        try {
+            java.lang.reflect.Method getMediaInfo = player.getClass().getMethod("getMediaInfo");
+            Object mediaInfo = getMediaInfo.invoke(player);
+            if (mediaInfo != null) {
+                java.lang.reflect.Field metaField = mediaInfo.getClass().getField("mMeta");
+                Object meta = metaField.get(mediaInfo);
+                if (meta != null) {
+                    java.lang.reflect.Method getString = meta.getClass().getMethod("getString", String.class);
+                    String transfer = (String) getString.invoke(meta, "color_transfer");
+                    if (transfer != null) {
+                        transfer = transfer.toLowerCase(Locale.US);
+                        if (transfer.contains("2084") || transfer.contains("smpte2084")) {
+                            return "HDR10";
+                        } else if (transfer.contains("arib") || transfer.contains("hlg") || transfer.contains("b67")) {
+                            return "HLG";
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return "SDR";
+    }
+
+    // 片名/URL 关键字智能纠偏 (排除 HDRip 等假词)
+    private String parseTitleColorFallback() {
+        try {
+            String title = "";
+            if (mPlayTitle != null && !TextUtils.isEmpty(mPlayTitle.getText())) {
+                title = mPlayTitle.getText().toString();
+            } else if (mPlayTitle1 != null && !TextUtils.isEmpty(mPlayTitle1.getText())) {
+                title = mPlayTitle1.getText().toString();
+            }
+            if (TextUtils.isEmpty(title)) return "SDR";
+
+            String upper = title.toUpperCase(Locale.US);
+            if (upper.contains("DOLBY VISION") || upper.contains("DOVI") || upper.contains("杜比视界")
+                    || upper.contains(".DV.") || upper.contains("-DV-") || upper.contains(" DV ")) {
+                return "Dolby Vision";
+            }
+            if (upper.contains("HDR10+") || upper.contains("HDR10PLUS")) {
+                return "HDR10+";
+            }
+            if (upper.contains("HLG")) {
+                return "HLG";
+            }
+            // 排除 HDRip (属于压缩格式，非 HDR)
+            if (upper.contains("HDR10") || (upper.contains("HDR") && !upper.contains("HDRIP"))) {
+                return "HDR10";
             }
         } catch (Throwable ignored) {}
         return "SDR";
