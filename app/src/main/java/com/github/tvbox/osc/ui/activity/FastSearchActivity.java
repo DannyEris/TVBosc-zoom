@@ -164,10 +164,25 @@ public class FastSearchActivity extends BaseActivity {
         });
 
         mGridView.setHasFixedSize(true);
-        mGridView.setLayoutManager(new V7GridLayoutManager(this.mContext, 4));
+        int searchViewMode = Hawk.get(HawkConfig.SEARCH_VIEW, 0);
+        if (searchViewMode == 0) {
+            // 0 为文字列表模式
+            mGridView.setLayoutManager(new V7LinearLayoutManager(this.mContext, 1, false));
+            mGridViewFilter.setLayoutManager(new V7LinearLayoutManager(this.mContext, 1, false));
+        } else {
+            // 1: 4列, 2: 5列, 3: 6列
+            int spanCount = 4;
+            if (searchViewMode == 2) spanCount = 5;
+            else if (searchViewMode == 3) spanCount = 6;
+            mGridView.setLayoutManager(new V7GridLayoutManager(this.mContext, spanCount));
+            mGridViewFilter.setLayoutManager(new V7GridLayoutManager(this.mContext, spanCount));
+        }
 
         searchAdapter = new FastSearchAdapter();
         mGridView.setAdapter(searchAdapter);
+
+        searchAdapterFilter = new FastSearchAdapter();
+        mGridViewFilter.setAdapter(searchAdapterFilter);
         mGridView.setOnItemListener(new TvRecyclerView.OnItemListener() {
             @Override
             public void onItemPreSelected(TvRecyclerView parent, View itemView, int position) {
@@ -196,7 +211,24 @@ public class FastSearchActivity extends BaseActivity {
         });
 
 
-        mGridViewFilter.setLayoutManager(new V7GridLayoutManager(this.mContext, 4));
+        mGridView.setHasFixedSize(true);
+        int searchViewMode = Hawk.get(HawkConfig.SEARCH_VIEW, 0);
+        if (searchViewMode == 0) {
+            // 0 为文字列表模式
+            mGridView.setLayoutManager(new V7LinearLayoutManager(this.mContext, 1, false));
+            mGridViewFilter.setLayoutManager(new V7LinearLayoutManager(this.mContext, 1, false));
+        } else {
+            // 1: 4列, 2: 5列, 3: 6列
+            int spanCount = 4;
+            if (searchViewMode == 2) spanCount = 5;
+            else if (searchViewMode == 3) spanCount = 6;
+            mGridView.setLayoutManager(new V7GridLayoutManager(this.mContext, spanCount));
+            mGridViewFilter.setLayoutManager(new V7GridLayoutManager(this.mContext, spanCount));
+        }
+
+        searchAdapter = new FastSearchAdapter();
+        mGridView.setAdapter(searchAdapter);
+
         searchAdapterFilter = new FastSearchAdapter();
         mGridViewFilter.setAdapter(searchAdapterFilter);
         mGridViewFilter.setOnItemListener(new TvRecyclerView.OnItemListener() {
