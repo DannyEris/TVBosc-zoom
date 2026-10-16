@@ -60,7 +60,7 @@ public class HistoryActivity extends BaseActivity {
     }
 
     private void toggleDelMode() {
-    	HawkConfig.hotVodDelete = !HawkConfig.hotVodDelete;
+        HawkConfig.hotVodDelete = !HawkConfig.hotVodDelete;
         historyAdapter.notifyDataSetChanged();
         delMode = !delMode;
         tvDelTip.setVisibility(delMode ? View.VISIBLE : View.GONE);        
@@ -73,7 +73,17 @@ public class HistoryActivity extends BaseActivity {
         tvDelTip = findViewById(R.id.tvDelTip);
         mGridView = findViewById(R.id.mGridView);
         mGridView.setHasFixedSize(true);
-        mGridView.setLayoutManager(new V7GridLayoutManager(this.mContext, isBaseOnWidth() ? 5 : 6));
+
+        // 联动“图片尺寸”设置：0-大(5列), 1-中(6列), 2-小(7列)
+        int posterSize = Hawk.get(HawkConfig.POSTER_SIZE, 0);
+        int spanCount = 5;
+        if (posterSize == 1) {
+            spanCount = 6;
+        } else if (posterSize == 2) {
+            spanCount = 7;
+        }
+        mGridView.setLayoutManager(new V7GridLayoutManager(this.mContext, spanCount));
+
         historyAdapter = new HistoryAdapter();
         mGridView.setAdapter(historyAdapter);
         tvDelete.setOnClickListener(new View.OnClickListener() {
