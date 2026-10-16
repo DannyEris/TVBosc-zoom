@@ -103,6 +103,11 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     // 活跃出帧监控心跳
     private volatile long mLastRenderedFrameTimeRealtime = 0;
+    // 实时物理出帧统计 (FPS)
+    private volatile int mRenderedFrameCount = 0;
+    private int mLastFpsFrameCount = 0;
+    private long mLastFpsCalcTime = 0;
+    private volatile float mCurrentRealFps = 0f;
     private int mStallRescueStep = 0;
     private Handler mWatchdogHandler;
     private Runnable mWatchdogRunnable;
@@ -367,6 +372,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             long presentationTimeUs,
                             long releaseTimeNs) {
                         mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
+                        mRenderedFrameCount++;
                         mStallRescueStep = 0; // 只要有连续帧送出，立即归零重置救急步进
                         super.renderOutputBufferV21(codec, index, presentationTimeUs, releaseTimeNs);
                     }
@@ -814,5 +820,42 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             inputBuffer.position(limit);
             buffer.flip();
         }
+    }
+    // 获取当前播放视频的 Format 格式对象
+    public Format getVideoFormat() {
+        if (mInternalPlayer != null) {
+            return mInternalPlayer.getVideoFormat();
+        }
+        return null;
+    }
+
+    // 获取当前真实物理渲染帧率 (FPS)
+    public float getRealFps() {
+        if (mInternalPlayer == null || !isPlaying()) {
+            return 0f;
+        }
+        // 1. 如果片源流头标注了静态帧率且大于0，优先参考
+        Format format = mInternalPlayer.getVideoFormat();
+        if (format != null && format.frameRate > 0) {
+            return format.frameRate;
+        }
+
+        // 2. 依据硬件实际送显出帧频率进行测算
+        long now = SystemClock.elapsedRealtime();
+        if (mLastFpsCalcTime > 0) {
+            long duration = now - mLastFpsCalcTime;
+            if (duration >= 800) { // 约每秒计算一次
+                int frames = mRenderedFrameCount - mLastFpsFrameCount;
+                if (frames > 0) {
+                    mCurrentRealFps = (frames * 1000f) / duration;
+                }
+                mLastFpsFrameCount = mRenderedFrameCount;
+                mLastFpsCalcTime = now;
+            }
+        } else {
+            mLastFpsCalcTime = now;
+            mLastFpsFrameCount = mRenderedFrameCount;
+        }
+        return mCurrentRealFps;
     }
 }
