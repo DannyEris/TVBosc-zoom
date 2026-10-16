@@ -2268,7 +2268,7 @@ public class VodController extends BaseController {
             return (int) (value * context.getResources().getDisplayMetrics().density + 0.5f);
         }
     }
-    // ==================== 顶部视频流信息提取 (格式/出帧FPS/码率) ====================
+    // ==================== 顶部视频流信息提取 (直连获取片源格式/出帧FPS/码率) ====================
     private void updateVideoFormatInfo() {
         if (mVideoFormatInfo == null) return;
         if (mTopCenterContainer != null && mTopCenterContainer.getVisibility() != VISIBLE) return;
@@ -2278,110 +2278,59 @@ public class VodController extends BaseController {
             String fpsStr = "";
             String bitrateStr = "";
 
-            Object player = getUnderlyingPlayer();
-            if (player != null) {
-                String className = player.getClass().getName();
-                if (className.contains("Exo") || className.contains("exo")) {
-                    Object exo = getExoPlayerInstance(player);
-                    Object formatObj = getExoVideoFormat(player);
-
-                    if (formatObj != null) {
-                        // 1. 精准提取色彩格式 (Dolby Vision / HDR10+ / HDR10 / HLG / SDR)
-                        formatStr = parseExoColorFormat(formatObj);
-
-                        // 尝试从元数据读取帧率
-                        try {
-                            java.lang.reflect.Field fpsField = formatObj.getClass().getField("frameRate");
-                            float fps = fpsField.getFloat(formatObj);
-                            if (fps > 0) {
-                                fpsStr = Math.round(fps) + " FPS";
-                            }
-                        } catch (Throwable ignored) {}
-
-                        // 尝试从元数据读取真实码率
-                        long bitrateVal = -1;
-                        try {
-                            java.lang.reflect.Field bitrateField = formatObj.getClass().getField("bitrate");
-                            bitrateVal = bitrateField.getInt(formatObj);
-                        } catch (Throwable ignored) {}
-                        if (bitrateVal <= 0) {
-                            try {
-                                java.lang.reflect.Field avgField = formatObj.getClass().getField("averageBitrate");
-                                bitrateVal = avgField.getInt(formatObj);
-                            } catch (Throwable ignored) {}
-                        }
-                        if (bitrateVal <= 0) {
-                            try {
-                                java.lang.reflect.Field peakField = formatObj.getClass().getField("peakBitrate");
-                                bitrateVal = peakField.getInt(formatObj);
-                            } catch (Throwable ignored) {}
-                        }
-                        if (bitrateVal > 0) {
-                            bitrateStr = String.format(Locale.US, "%.1f Mbps", bitrateVal / 1000000.0f);
-                        }
-                    }
-
-                    // 2. 物理渲染出帧 FPS 动态计算
-                    if (exo != null) {
-                        try {
-                            java.lang.reflect.Method mc = exo.getClass().getMethod("getVideoDecoderCounters");
-                            Object counters = mc.invoke(exo);
-                            if (counters != null) {
-                                java.lang.reflect.Field rf = counters.getClass().getField("renderedOutputBufferCount");
-                                int renderedFrames = rf.getInt(counters);
-                                long now = System.currentTimeMillis();
-                                if (lastRenderedFrameCount >= 0 && now > lastFrameCalcTime) {
-                                    int diffFrames = renderedFrames - lastRenderedFrameCount;
-                                    long diffTime = now - lastFrameCalcTime;
-                                    if (diffTime >= 800 && diffFrames > 0) {
-                                        float calcFps = (diffFrames * 1000f) / diffTime;
-                                        if (calcFps >= 10 && calcFps <= 144) {
-                                            int roundFps = Math.round(calcFps);
-                                            if (Math.abs(calcFps - 24) < 1.2f) roundFps = 24;
-                                            else if (Math.abs(calcFps - 25) < 1.0f) roundFps = 25;
-                                            else if (Math.abs(calcFps - 30) < 1.2f) roundFps = 30;
-                                            else if (Math.abs(calcFps - 50) < 1.5f) roundFps = 50;
-                                            else if (Math.abs(calcFps - 60) < 1.8f) roundFps = 60;
-                                            lastCalculatedFps = roundFps + " FPS";
-                                        }
-                                        lastRenderedFrameCount = renderedFrames;
-                                        lastFrameCalcTime = now;
-                                    } else if (diffTime >= 800 && diffFrames == 0) {
-                                        lastFrameCalcTime = now;
-                                    }
-                                } else {
-                                    lastRenderedFrameCount = renderedFrames;
-                                    lastFrameCalcTime = now;
-                                }
-                                if (!TextUtils.isEmpty(lastCalculatedFps)) {
-                                    fpsStr = lastCalculatedFps;
-                                }
-                            }
-                        } catch (Throwable ignored) {}
-                    }
-                } else if (className.contains("Ijk") || className.contains("ijk")) {
-                    // IjkPlayer 真实色彩与帧率提取
-                    formatStr = parseIjkColorFormat(player);
-
-                    try {
-                        java.lang.reflect.Method fpsMethod = player.getClass().getMethod("getVideoOutputFramesPerSecond");
-                        float fps = (Float) fpsMethod.invoke(player);
-                        if (fps > 0) {
-                            fpsStr = Math.round(fps) + " FPS";
-                        }
-                    } catch (Throwable ignored) {}
-
-                    try {
-                        java.lang.reflect.Method brMethod = player.getClass().getMethod("getBitRate");
-                        long br = (Long) brMethod.invoke(player);
-                        if (br > 0) {
-                            bitrateStr = String.format(Locale.US, "%.1f Mbps", br / 1000000.0f);
-                        }
-                    } catch (Throwable ignored) {}
+            xyz.doikki.videoplayer.player.AbstractPlayer player = null;
+            if (mActivity != null) {
+                com.github.tvbox.osc.player.MyVideoView vv = mActivity.findViewById(R.id.mVideoView);
+                if (vv != null) {
+                    player = vv.getMediaPlayer();
                 }
             }
 
-            // 若底层均未识别出 HDR，通过播放片名进行智能识别兜底
+            if (player instanceof xyz.doikki.videoplayer.exo.ExoMediaPlayer) {
+                xyz.doikki.videoplayer.exo.ExoMediaPlayer exoPlayer = (xyz.doikki.videoplayer.exo.ExoMediaPlayer) player;
+                com.google.android.exoplayer2.Format format = exoPlayer.getVideoFormat();
+                if (format != null) {
+                    // 1. 片源色彩格式解析
+                    formatStr = parseExoColorFormatDirect(format);
+
+                    // 2. 片源真实码率解析
+                    long bitrate = format.bitrate > 0 ? format.bitrate : (format.peakBitrate > 0 ? format.peakBitrate : format.averageBitrate);
+                    if (bitrate > 0) {
+                        bitrateStr = String.format(Locale.US, "%.1f Mbps", bitrate / 1000000.0f);
+                    }
+                }
+
+                // 3. 片源物理出帧 FPS 获取
+                float realFps = exoPlayer.getRealFps();
+                if (realFps >= 10f && realFps <= 144f) {
+                    int roundFps = Math.round(realFps);
+                    if (Math.abs(realFps - 24) < 1.2f) roundFps = 24;
+                    else if (Math.abs(realFps - 25) < 1.0f) roundFps = 25;
+                    else if (Math.abs(realFps - 30) < 1.2f) roundFps = 30;
+                    else if (Math.abs(realFps - 50) < 1.5f) roundFps = 50;
+                    else if (Math.abs(realFps - 60) < 1.8f) roundFps = 60;
+                    fpsStr = roundFps + " FPS";
+                }
+            } else if (player != null) {
+                // IJK 播放器提取分支
+                try {
+                    java.lang.reflect.Method fpsMethod = player.getClass().getMethod("getVideoOutputFramesPerSecond");
+                    float fps = (Float) fpsMethod.invoke(player);
+                    if (fps > 0) {
+                        fpsStr = Math.round(fps) + " FPS";
+                    }
+                } catch (Throwable ignored) {}
+                try {
+                    java.lang.reflect.Method brMethod = player.getClass().getMethod("getBitRate");
+                    long br = (Long) brMethod.invoke(player);
+                    if (br > 0) {
+                        bitrateStr = String.format(Locale.US, "%.1f Mbps", br / 1000000.0f);
+                    }
+                } catch (Throwable ignored) {}
+                formatStr = parseIjkColorFormat(player);
+            }
+
+            // 若流内未带 HDR 标签，则通过片名做最终兜底
             if ("SDR".equals(formatStr)) {
                 formatStr = parseTitleColorFallback();
             }
@@ -2401,148 +2350,32 @@ public class VodController extends BaseController {
         }
     }
 
-    private Object getUnderlyingPlayer() {
+    private String parseExoColorFormatDirect(com.google.android.exoplayer2.Format format) {
+        if (format == null) return "SDR";
         try {
-            Object absPlayer = null;
-            if (mControlWrapper != null) {
-                Class<?> clazz = mControlWrapper.getClass();
-                while (clazz != null && clazz != Object.class) {
-                    for (java.lang.reflect.Field f : clazz.getDeclaredFields()) {
-                        try {
-                            f.setAccessible(true);
-                            Object val = f.get(mControlWrapper);
-                            if (val != null && val.getClass().getName().contains("VideoView")) {
-                                Class<?> vClazz = val.getClass();
-                                while (vClazz != null && vClazz != Object.class) {
-                                    for (java.lang.reflect.Field mf : vClazz.getDeclaredFields()) {
-                                        try {
-                                            mf.setAccessible(true);
-                                            Object pv = mf.get(val);
-                                            if (pv != null && (pv.getClass().getName().contains("Player") || pv.getClass().getName().contains("player"))) {
-                                                absPlayer = pv;
-                                                break;
-                                            }
-                                        } catch (Throwable ignored) {}
-                                    }
-                                    if (absPlayer != null) break;
-                                    vClazz = vClazz.getSuperclass();
-                                }
-                            }
-                        } catch (Throwable ignored) {}
-                        if (absPlayer != null) break;
-                    }
-                    if (absPlayer != null) break;
-                    clazz = clazz.getSuperclass();
-                }
-            }
-            if (absPlayer == null && mActivity != null) {
-                View vv = mActivity.findViewById(R.id.mVideoView);
-                if (vv != null) {
-                    Class<?> vClazz = vv.getClass();
-                    while (vClazz != null && vClazz != Object.class) {
-                        for (java.lang.reflect.Field mf : vClazz.getDeclaredFields()) {
-                            try {
-                                mf.setAccessible(true);
-                                Object pv = mf.get(vv);
-                                if (pv != null && (pv.getClass().getName().contains("Player") || pv.getClass().getName().contains("player"))) {
-                                    absPlayer = pv;
-                                    break;
-                                }
-                            } catch (Throwable ignored) {}
-                        }
-                        if (absPlayer != null) break;
-                        vClazz = vClazz.getSuperclass();
-                    }
-                }
-            }
-            return absPlayer;
-        } catch (Throwable th) {
-            return null;
-        }
-    }
+            String mime = format.sampleMimeType != null ? format.sampleMimeType.toLowerCase(Locale.US) : "";
+            String codecs = format.codecs != null ? format.codecs.toLowerCase(Locale.US) : "";
 
-    private Object getExoPlayerInstance(Object absPlayer) {
-        if (absPlayer == null) return null;
-        Class<?> clazz = absPlayer.getClass();
-        while (clazz != null && clazz != Object.class) {
-            for (java.lang.reflect.Field f : clazz.getDeclaredFields()) {
-                try {
-                    f.setAccessible(true);
-                    Object val = f.get(absPlayer);
-                    if (val != null && (val.getClass().getName().contains("ExoPlayer") || val.getClass().getName().contains("SimpleExoPlayer"))) {
-                        return val;
-                    }
-                } catch (Throwable ignored) {}
-            }
-            clazz = clazz.getSuperclass();
-        }
-        return null;
-    }
-
-    private Object getExoVideoFormat(Object absPlayer) {
-        try {
-            Object exo = getExoPlayerInstance(absPlayer);
-            if (exo == null) return null;
-            java.lang.reflect.Method m = exo.getClass().getMethod("getVideoFormat");
-            return m.invoke(exo);
-        } catch (Throwable th) {
-            return null;
-        }
-    }
-
-    // 严谨的 ExoPlayer 色彩空间与动态范围判断
-    private String parseExoColorFormat(Object formatObj) {
-        try {
-            String mime = "";
-            String codecs = "";
-            try {
-                java.lang.reflect.Field mimeField = formatObj.getClass().getField("sampleMimeType");
-                Object m = mimeField.get(formatObj);
-                if (m != null) mime = m.toString().toLowerCase(Locale.US);
-            } catch (Throwable ignored) {}
-
-            try {
-                java.lang.reflect.Field codecsField = formatObj.getClass().getField("codecs");
-                Object c = codecsField.get(formatObj);
-                if (c != null) codecs = c.toString().toLowerCase(Locale.US);
-            } catch (Throwable ignored) {}
-
-            // 1. 杜比视界判断 (全小写兼容，覆盖 dvhe, dvh1, dvav, dva1, dav1)
+            // 杜比视界判断
             if (mime.contains("dolby") || mime.contains("dvh1") || mime.contains("dvhe")
                     || codecs.contains("dvh1") || codecs.contains("dvhe")
                     || codecs.contains("dvav") || codecs.contains("dva1") || codecs.contains("dav1")) {
                 return "Dolby Vision";
             }
 
-            // 2. ColorInfo 真实光电转换参数判断
-            java.lang.reflect.Field colorInfoField = formatObj.getClass().getField("colorInfo");
-            Object colorInfo = colorInfoField.get(formatObj);
-            if (colorInfo != null) {
-                java.lang.reflect.Field transferField = colorInfo.getClass().getField("colorTransfer");
-                int transfer = transferField.getInt(colorInfo);
-                java.lang.reflect.Field spaceField = colorInfo.getClass().getField("colorSpace");
-                int space = spaceField.getInt(colorInfo);
-
-                // ARIB STD-B67 -> HLG
+            // HDR10 / HLG 判断
+            if (format.colorInfo != null) {
+                int transfer = format.colorInfo.colorTransfer;
                 if (transfer == 7) {
                     return "HLG";
                 }
-                // SMPTE ST 2084 (PQ) -> HDR10
                 if (transfer == 6) {
                     return "HDR10";
                 }
-
-                // 检查 ST 2086 静态元数据 (Mastering Display Color Volume)
-                try {
-                    java.lang.reflect.Field staticField = colorInfo.getClass().getField("hdrStaticInfo");
-                    byte[] hdrStaticInfo = (byte[]) staticField.get(colorInfo);
-                    if (hdrStaticInfo != null && hdrStaticInfo.length > 0) {
-                        return "HDR10";
-                    }
-                } catch (Throwable ignored) {}
-
-                // 色域为 BT.2020 且光电转换非 SDR 时的补丁判断
-                if (space == 6 && transfer != 3 && transfer != 1) { // 3: SDR, 1: BT709
+                if (format.colorInfo.hdrStaticInfo != null && format.colorInfo.hdrStaticInfo.length > 0) {
+                    return "HDR10";
+                }
+                if (format.colorInfo.colorSpace == 6 && transfer != 3 && transfer != 1) {
                     return "HDR10";
                 }
             }
@@ -2550,7 +2383,6 @@ public class VodController extends BaseController {
         return "SDR";
     }
 
-    // 严谨的 IjkPlayer 色彩提取
     private String parseIjkColorFormat(Object player) {
         try {
             java.lang.reflect.Method getMediaInfo = player.getClass().getMethod("getMediaInfo");
@@ -2575,7 +2407,6 @@ public class VodController extends BaseController {
         return "SDR";
     }
 
-    // 片名/URL 关键字智能纠偏 (排除 HDRip 等假词)
     private String parseTitleColorFallback() {
         try {
             String title = "";
@@ -2597,7 +2428,6 @@ public class VodController extends BaseController {
             if (upper.contains("HLG")) {
                 return "HLG";
             }
-            // 排除 HDRip (属于压缩格式，非 HDR)
             if (upper.contains("HDR10") || (upper.contains("HDR") && !upper.contains("HDRIP"))) {
                 return "HDR10";
             }
