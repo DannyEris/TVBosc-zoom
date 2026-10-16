@@ -2271,7 +2271,6 @@ public class VodController extends BaseController {
     // ==================== 顶部视频流信息提取 (直连获取片源格式/出帧FPS/码率) ====================
     private void updateVideoFormatInfo() {
         if (mVideoFormatInfo == null) return;
-        if (mTopCenterContainer != null && mTopCenterContainer.getVisibility() != VISIBLE) return;
 
         try {
             String formatStr = "SDR";
