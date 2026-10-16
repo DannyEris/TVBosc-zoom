@@ -170,6 +170,10 @@ public class ModelSettingFragment extends BaseLazyFragment {
         tvRender.setText(PlayerHelper.getRenderName(Hawk.get(HawkConfig.PLAY_RENDER, 1)));
         tvPosterSize = findViewById(R.id.tvPosterSize);
         tvPosterSize.setText(getPosterSizeName(Hawk.get(HawkConfig.POSTER_SIZE, 0)));
+        tvHomePosterSize = findViewById(R.id.tvHomePosterSize);
+        if (tvHomePosterSize != null) {
+            tvHomePosterSize.setText(getHomePosterSizeName(Hawk.get(HawkConfig.HOME_POSTER_SIZE, 0)));
+        }
         tvIjkCachePlay.setText(Hawk.get(HawkConfig.IJK_CACHE_PLAY, false) ? "开启" : "关闭");
         tvHomeDefaultShow = findViewById(R.id.tvHomeText);
         tvHomeDefaultShow.setText(Hawk.get(HawkConfig.DEFAULT_LOAD_LIVE, false) ? "直播" : "点播");
@@ -628,10 +632,6 @@ public class ModelSettingFragment extends BaseLazyFragment {
                     public void click(Integer value, int pos) {
                         Hawk.put(HawkConfig.POSTER_SIZE, value);
                         tvPosterSize.setText(getPosterSizeName(value));
-                        tvHomePosterSize = findViewById(R.id.tvHomePosterSize);
-                        if (tvHomePosterSize != null) {
-                            tvHomePosterSize.setText(getHomePosterSizeName(Hawk.get(HawkConfig.HOME_POSTER_SIZE, 0)));
-                        }
                         // 发送通知，让主页及列表重刷网格
                         EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_HOME_SOURCE_CHANGE));
                     }
