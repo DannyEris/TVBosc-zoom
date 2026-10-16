@@ -738,8 +738,10 @@ public class ModelSettingFragment extends BaseLazyFragment {
                 FastClickCheckUtil.check(v);
                 int defaultPos = Hawk.get(HawkConfig.SEARCH_VIEW, 0);
                 ArrayList<Integer> types = new ArrayList<>();
-                types.add(0);
-                types.add(1);
+                types.add(0); // 文字列表
+                types.add(1); // 缩略图 大 (4列)
+                types.add(2); // 缩略图 中 (5列)
+                types.add(3); // 缩略图 小 (6列)                
                 SelectDialog<Integer> dialog = new SelectDialog<>(mActivity);
                 dialog.setTip("请选择搜索视图");
                 dialog.setAdapter(new SelectDialogAdapter.SelectDialogInterface<Integer>() {
@@ -1192,10 +1194,14 @@ public class ModelSettingFragment extends BaseLazyFragment {
     }
 
     String getSearchView(int type) {
-        if (type == 0) {
-            return "文字列表";
+        if (type == 1) {
+            return "缩略图 大 (4列)";
+        } else if (type == 2) {
+            return "缩略图 中 (5列)";
+        } else if (type == 3) {
+            return "缩略图 小 (6列)";
         } else {
-            return "缩略图";
+            return "文字列表";
         }
     }
     String getPosterSizeName(int type) {
