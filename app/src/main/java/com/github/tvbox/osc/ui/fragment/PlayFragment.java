@@ -1795,6 +1795,7 @@ public class PlayFragment extends BaseLazyFragment {
 
     @Override
     public void onDestroyView() {
+        com.github.tvbox.osc.util.AmlogicCropHelper.resetCrop();
         audioPlayback = false;
         switchingPlayback = false;
         MusicPlaybackService.stop(getContext(), this);
@@ -2178,8 +2179,9 @@ public class PlayFragment extends BaseLazyFragment {
         }
     }
 
-    public void play(boolean reset) {
+    public void play(boolean reset) {        
         if(mVodInfo==null)return;
+        com.github.tvbox.osc.util.AmlogicCropHelper.resetCrop();
         boolean reusePlayer = reusePlayerOnSwitch && !releasePlayerOnSwitch;
         reusePlayerOnSwitch = false;
         releasePlayerOnSwitch = false;
@@ -2475,6 +2477,7 @@ public class PlayFragment extends BaseLazyFragment {
     }
 
     public void pauseForHidden() {
+        com.github.tvbox.osc.util.AmlogicCropHelper.resetCrop();
         cancelPlayTimeout();
         stopParse();
         playbackStarted = false;
