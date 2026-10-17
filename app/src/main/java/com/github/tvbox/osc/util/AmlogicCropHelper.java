@@ -6,7 +6,7 @@ import java.io.FileOutputStream;
 public class AmlogicCropHelper {
     private static final String CROP_PATH = "/sys/class/video/crop";
     private static Boolean sIsSupported = null;
-    private static int sWriteMode = 0; // 1: FileOutputStream, 2: su命令直接写
+    private static int sWriteMode = 0; // 1: FileOutputStream 直写, 2: su 管道
 
     /**
      * 智能提权与可写性探测
@@ -26,11 +26,10 @@ public class AmlogicCropHelper {
                 return true;
             }
 
-            // 2. 若无写入权限，尝试借助系统 su 将节点一次性提权为 666
+            // 2. 尝试借助系统 su 一次性提权为 666 (适用于开放式外贸盒子)
             try {
                 Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", "chmod 666 " + CROP_PATH});
                 p.waitFor();
-                // 提权后再测一次直接写入
                 if (tryDirectWrite()) {
                     sWriteMode = 1;
                     sIsSupported = true;
@@ -38,7 +37,7 @@ public class AmlogicCropHelper {
                 }
             } catch (Throwable ignored) {}
 
-            // 3. 若 chmod 受限，尝试通过 su 管道直接写入测试
+            // 3. 尝试通过 su 管道直接写入
             try {
                 Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", "echo 0 0 0 0 > " + CROP_PATH});
                 if (p.waitFor() == 0) {
@@ -72,7 +71,6 @@ public class AmlogicCropHelper {
             @Override
             public void run() {
                 try {
-                    // 模式 1：高能效零延迟直写（chmod 666 成功后走此通道）
                     if (sWriteMode == 1) {
                         File file = new File(CROP_PATH);
                         try (FileOutputStream fos = new FileOutputStream(file)) {
@@ -80,11 +78,10 @@ public class AmlogicCropHelper {
                             fos.flush();
                             return;
                         } catch (Throwable th) {
-                            sWriteMode = 2; // 异常时回退到 su 管道
+                            sWriteMode = 2;
                         }
                     }
 
-                    // 模式 2：su 命令行兜底通道
                     if (sWriteMode == 2) {
                         Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", "echo " + cmd + " > " + CROP_PATH});
                         p.waitFor();
@@ -98,7 +95,7 @@ public class AmlogicCropHelper {
      * 清除硬件裁剪，恢复原始全幅
      */
     public static void resetCrop() {
-        if (!isSupported()) return;
+        if (sIsSupported == null || !sIsSupported) return;
         setCrop(0, 0, 0, 0);
     }
 }
