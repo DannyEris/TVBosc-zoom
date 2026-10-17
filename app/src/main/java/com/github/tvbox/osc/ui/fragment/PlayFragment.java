@@ -530,7 +530,7 @@ public class PlayFragment extends BaseLazyFragment {
     }
 
     /**
-     * 针对 Amlogic 晶晨平台（Tx9 pro、小米电视 4A、天猫魔盒 M19）全面优化的严格等比缩放
+     * 针对多平台渲染特性分流适配的等比缩放
      */
     private void applyVideoZoom(final float zoom) {
         if (mVideoView == null) return;
@@ -539,7 +539,7 @@ public class PlayFragment extends BaseLazyFragment {
             public void run() {
                 if (mVideoView == null) return;
 
-                // 确保外层播放器容器与 UI 控件层绝对不发生几何形变
+                // 保持外层播放器容器与 UI 控件层不发生几何形变
                 if (mVideoView.getScaleX() != 1.0f || mVideoView.getScaleY() != 1.0f) {
                     mVideoView.setScaleX(1.0f);
                     mVideoView.setScaleY(1.0f);
@@ -580,37 +580,91 @@ public class PlayFragment extends BaseLazyFragment {
                     return;
                 }
 
-                // 计算不溢出物理屏幕的标准自适应基准宽高 (如 2582x1080 对应 1920x803)
-                float videoRatio = (float) videoWidth / (float) videoHeight;
-                float containerRatio = (float) containerWidth / (float) containerHeight;
-                int baseWidth;
-                int baseHeight;
-
-                if (videoRatio > containerRatio) {
-                    baseWidth = containerWidth;
-                    baseHeight = Math.round(containerWidth / videoRatio);
-                } else {
-                    baseHeight = containerHeight;
-                    baseWidth = Math.round(containerHeight * videoRatio);
-                }
-
                 // 允许放大时边缘溢出父容器
                 if (renderView.getParent() instanceof ViewGroup) {
                     ((ViewGroup) renderView.getParent()).setClipChildren(false);
                 }
                 mVideoView.setClipChildren(false);
 
+                // 1.0x 重置状态：清除硬件裁切，恢复全屏自适应布局
                 if (Math.abs(zoom - 1.0f) < 0.01f) {
-                    // 1.0x 重置状态：恢复为全屏自适应布局，放行菜单中的常规画面比例切换（16:9 / 4:3 等）
                     renderView.setScaleX(1.0f);
                     renderView.setScaleY(1.0f);
+                    com.github.tvbox.osc.util.AmlogicCropHelper.resetCrop();
                     FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             Gravity.CENTER);
                     renderView.setLayoutParams(lp);
+                    renderView.requestLayout();
+                    return;
+                }
+
+                float videoRatio = (float) videoWidth / (float) videoHeight;
+                float containerRatio = (float) containerWidth / (float) containerHeight;
+                int baseWidth;
+                int baseHeight;
+                int targetWidth;
+                int targetHeight;
+                int cropTop = 0;
+                int cropBottom = 0;
+                int cropLeft = 0;
+                int cropRight = 0;
+
+                if (videoRatio > containerRatio) {
+                    // 宽荧幕（左右顶格，上下留黑边）
+                    baseWidth = containerWidth;
+                    baseHeight = Math.round(containerWidth / videoRatio);
+
+                    if (zoom < 1.0f) {
+                        targetWidth = Math.round(baseWidth * zoom);
+                        targetHeight = Math.round(baseHeight * zoom);
+                    } else {
+                        targetWidth = containerWidth;
+                        targetHeight = Math.min(Math.round(baseHeight * zoom), containerHeight);
+
+                        float displayedRatio = (float) targetWidth / (float) targetHeight;
+                        int activeVideoWidth = Math.round(videoHeight * displayedRatio);
+                        if (activeVideoWidth > videoWidth) activeVideoWidth = videoWidth;
+
+                        int totalCropX = videoWidth - activeVideoWidth;
+                        cropLeft = totalCropX / 2;
+                        cropRight = totalCropX - cropLeft;
+                    }
                 } else {
-                    // 放大/缩小状态：锁定在基准尺寸视口内，严格使用中心 Pivot 进行等比矩阵缩放，防止单边锁死拉伸
+                    // 窄幅片源（上下顶格，左右留黑边）
+                    baseHeight = containerHeight;
+                    baseWidth = Math.round(containerHeight * videoRatio);
+
+                    if (zoom < 1.0f) {
+                        targetWidth = Math.round(baseWidth * zoom);
+                        targetHeight = Math.round(baseHeight * zoom);
+                    } else {
+                        targetHeight = containerHeight;
+                        targetWidth = Math.min(Math.round(baseWidth * zoom), containerWidth);
+
+                        float displayedRatio = (float) targetWidth / (float) targetHeight;
+                        int activeVideoHeight = Math.round(videoWidth / displayedRatio);
+                        if (activeVideoHeight > videoHeight) activeVideoHeight = videoHeight;
+
+                        int totalCropY = videoHeight - activeVideoHeight;
+                        cropTop = totalCropY / 2;
+                        cropBottom = totalCropY - cropTop;
+                    }
+                }
+
+                if (com.github.tvbox.osc.util.AmlogicCropHelper.isSupported()) {
+                    // 支持硬件裁切节点（如 Tx9 Pro）：锁定安全物理视口 + VPP 硬件裁切
+                    renderView.setScaleX(1.0f);
+                    renderView.setScaleY(1.0f);
+                    FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                            targetWidth,
+                            targetHeight,
+                            Gravity.CENTER);
+                    renderView.setLayoutParams(lp);
+                    com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(cropTop, cropLeft, cropBottom, cropRight);
+                } else {
+                    // 节点只读或定制系统（如 M19、小米电视 4A）：使用 View 矩阵等比缩放
                     FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                             baseWidth,
                             baseHeight,
