@@ -9,7 +9,6 @@ public class MeasureHelper {
     private int mVideoHeight;
     private int mCurrentScreenScale;
     private int mVideoRotationDegree;
-    private float mVideoZoom = 1.0f;
 
     public void setVideoRotation(int videoRotationDegree) {
         mVideoRotationDegree = videoRotationDegree;
@@ -22,15 +21,6 @@ public class MeasureHelper {
 
     public void setScreenScale(int screenScale) {
         mCurrentScreenScale = screenScale;
-    }
-
-    public void setVideoZoom(float zoom) {
-        if (zoom <= 0.1f) zoom = 1.0f;
-        mVideoZoom = zoom;
-    }
-
-    public float getVideoZoom() {
-        return mVideoZoom;
     }
 
     public int[] doMeasure(int widthMeasureSpec, int heightMeasureSpec) {
@@ -50,39 +40,11 @@ public class MeasureHelper {
         switch (mCurrentScreenScale) {
             case VideoView.SCREEN_SCALE_DEFAULT:
             default:
-                int containerWidth = View.MeasureSpec.getSize(widthMeasureSpec);
-                int containerHeight = View.MeasureSpec.getSize(heightMeasureSpec);
-                float videoRatio = (float) mVideoWidth / (float) mVideoHeight;
-                float containerRatio = (float) containerWidth / (float) containerHeight;
-
-                if (Math.abs(mVideoZoom - 1.0f) < 0.01f) {
-                    // 标准 1.0x 默认自适应黑边排版
-                    if (mVideoWidth * height < width * mVideoHeight) {
-                        width = height * mVideoWidth / mVideoHeight;
-                    } else if (mVideoWidth * height > width * mVideoHeight) {
-                        height = width * mVideoHeight / mVideoWidth;
-                    }
-                } else if (mVideoZoom < 1.0f) {
-                    // 缩小：整体等比收缩，四周黑边扩大，坐标完全位于屏幕内部
-                    if (videoRatio > containerRatio) {
-                        width = Math.round(containerWidth * mVideoZoom);
-                        height = Math.round((containerWidth / videoRatio) * mVideoZoom);
-                    } else {
-                        height = Math.round(containerHeight * mVideoZoom);
-                        width = Math.round((containerHeight * videoRatio) * mVideoZoom);
-                    }
-                } else {
-                    // 放大：对标 Amlogic 芯片物理边界。
-                    // 宽荧幕(2.35:1)宽度锁定屏幕物理上限(1920)，高度平滑扩大(消除黑边)，配合硬解裁切实现绝对等比
-                    if (videoRatio > containerRatio) {
-                        width = containerWidth;
-                        int baseHeight = Math.round(containerWidth / videoRatio);
-                        height = Math.min(Math.round(baseHeight * mVideoZoom), containerHeight);
-                    } else {
-                        height = containerHeight;
-                        int baseWidth = Math.round(containerHeight * videoRatio);
-                        width = Math.min(Math.round(baseWidth * mVideoZoom), containerWidth);
-                    }
+                // 严格维持视频原生的物理宽高比，绝不在度量层产生畸变视口
+                if (mVideoWidth * height < width * mVideoHeight) {
+                    width = height * mVideoWidth / mVideoHeight;
+                } else if (mVideoWidth * height > width * mVideoHeight) {
+                    height = width * mVideoHeight / mVideoWidth;
                 }
                 break;
             case VideoView.SCREEN_SCALE_ORIGINAL:
