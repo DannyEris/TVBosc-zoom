@@ -592,6 +592,10 @@ public class PlayFragment extends BaseLazyFragment {
 
                 // 1.0x 重置状态：清除硬件裁切，恢复全屏自适应布局
                 if (Math.abs(zoom - 1.0f) < 0.01f) {
+                    int originalScale = mVodPlayerCfg != null ? mVodPlayerCfg.optInt("sc", 0) : xyz.doikki.videoplayer.player.VideoView.SCREEN_SCALE_DEFAULT;
+                    if (renderView instanceof xyz.doikki.videoplayer.render.IRenderView) {
+                        ((xyz.doikki.videoplayer.render.IRenderView) renderView).setScaleType(originalScale);
+                    }
                     renderView.setScaleX(1.0f);
                     renderView.setScaleY(1.0f);
                     com.github.tvbox.osc.util.AmlogicCropHelper.resetCrop();
