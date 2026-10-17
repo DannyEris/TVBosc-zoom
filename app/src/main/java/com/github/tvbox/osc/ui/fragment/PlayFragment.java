@@ -543,7 +543,6 @@ public class PlayFragment extends BaseLazyFragment {
             public void run() {
                 if (mVideoView == null) return;
 
-                // 保持外层播放器容器与 UI 控件层不发生几何形变
                 if (mVideoView.getScaleX() != 1.0f || mVideoView.getScaleY() != 1.0f) {
                     mVideoView.setScaleX(1.0f);
                     mVideoView.setScaleY(1.0f);
@@ -584,27 +583,15 @@ public class PlayFragment extends BaseLazyFragment {
                     return;
                 }
 
-                // 允许放大时边缘溢出父容器
-                if (renderView.getParent() instanceof ViewGroup) {
-                    ((ViewGroup) renderView.getParent()).setClipChildren(false);
-                }
-                mVideoView.setClipChildren(false);
-
-                // 1.0x 重置状态：清除硬件裁切，恢复全屏自适应布局
+                // 1.0x 重置状态
                 if (Math.abs(zoom - 1.0f) < 0.01f) {
                     int originalScale = mVodPlayerCfg != null ? mVodPlayerCfg.optInt("sc", 0) : xyz.doikki.videoplayer.player.VideoView.SCREEN_SCALE_DEFAULT;
-                    if (renderView instanceof xyz.doikki.videoplayer.render.IRenderView) {
-                        ((xyz.doikki.videoplayer.render.IRenderView) renderView).setScaleType(originalScale);
+                    if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
+                        ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(1.0f);
                     }
                     renderView.setScaleX(1.0f);
                     renderView.setScaleY(1.0f);
                     com.github.tvbox.osc.util.AmlogicCropHelper.resetCrop();
-                    FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            Gravity.CENTER);
-                    renderView.setLayoutParams(lp);
-                    renderView.requestLayout();
                     hasShownUnsupportedZoomToast = false;
                     handleScreenScaleCrop(originalScale);
                     return;
@@ -612,92 +599,56 @@ public class PlayFragment extends BaseLazyFragment {
 
                 float videoRatio = (float) videoWidth / (float) videoHeight;
                 float containerRatio = (float) containerWidth / (float) containerHeight;
-                int baseWidth;
-                int baseHeight;
-                int targetWidth;
-                int targetHeight;
                 int cropTop = 0;
                 int cropBottom = 0;
                 int cropLeft = 0;
                 int cropRight = 0;
 
                 if (videoRatio > containerRatio) {
-                    // 宽荧幕（左右顶格，上下留黑边）
-                    baseWidth = containerWidth;
-                    baseHeight = Math.round(containerWidth / videoRatio);
+                    // 宽荧幕：根据 zoom 算出目标展示高度，以此反推芯片两侧裁切量
+                    int baseHeight = Math.round(containerWidth / videoRatio);
+                    int targetHeight = Math.min((int) Math.round(baseHeight * zoom), containerHeight);
+                    float displayedRatio = (float) containerWidth / (float) targetHeight;
+                    int activeVideoWidth = Math.round(videoHeight * displayedRatio);
+                    if (activeVideoWidth > videoWidth) activeVideoWidth = videoWidth;
 
-                    if (zoom < 1.0f) {
-                        targetWidth = Math.round(baseWidth * zoom);
-                        targetHeight = Math.round(baseHeight * zoom);
-                    } else {
-                        targetWidth = containerWidth;
-                        targetHeight = Math.min(Math.round(baseHeight * zoom), containerHeight);
-
-                        float displayedRatio = (float) targetWidth / (float) targetHeight;
-                        int activeVideoWidth = Math.round(videoHeight * displayedRatio);
-                        if (activeVideoWidth > videoWidth) activeVideoWidth = videoWidth;
-
-                        int totalCropX = videoWidth - activeVideoWidth;
-                        cropLeft = totalCropX / 2;
-                        cropRight = totalCropX - cropLeft;
-                    }
+                    int totalCropX = videoWidth - activeVideoWidth;
+                    cropLeft = totalCropX / 2;
+                    cropRight = totalCropX - cropLeft;
                 } else {
-                    // 窄幅片源（上下顶格，左右留黑边）
-                    baseHeight = containerHeight;
-                    baseWidth = Math.round(containerHeight * videoRatio);
+                    // 窄幅片源
+                    int baseWidth = Math.round(containerHeight * videoRatio);
+                    int targetWidth = Math.min((int) Math.round(baseWidth * zoom), containerWidth);
+                    float displayedRatio = (float) targetWidth / (float) containerHeight;
+                    int activeVideoHeight = Math.round(videoWidth / displayedRatio);
+                    if (activeVideoHeight > videoHeight) activeVideoHeight = videoHeight;
 
-                    if (zoom < 1.0f) {
-                        targetWidth = Math.round(baseWidth * zoom);
-                        targetHeight = Math.round(baseHeight * zoom);
-                    } else {
-                        targetHeight = containerHeight;
-                        targetWidth = Math.min(Math.round(baseWidth * zoom), containerWidth);
-
-                        float displayedRatio = (float) targetWidth / (float) targetHeight;
-                        int activeVideoHeight = Math.round(videoWidth / displayedRatio);
-                        if (activeVideoHeight > videoHeight) activeVideoHeight = videoHeight;
-
-                        int totalCropY = videoHeight - activeVideoHeight;
-                        cropTop = totalCropY / 2;
-                        cropBottom = totalCropY - cropTop;
-                    }
+                    int totalCropY = videoHeight - activeVideoHeight;
+                    cropTop = totalCropY / 2;
+                    cropBottom = totalCropY - cropTop;
                 }
 
                 if (com.github.tvbox.osc.util.AmlogicCropHelper.isSupported()) {
-                    // 关键：放行视口高度，禁止 MeasureHelper 强行压缩回 803px
-                    if (renderView instanceof xyz.doikki.videoplayer.render.IRenderView) {
-                        ((xyz.doikki.videoplayer.render.IRenderView) renderView).setScaleType(xyz.doikki.videoplayer.player.VideoView.SCREEN_SCALE_MATCH_PARENT);
+                    // 晶晨芯片：通知底层度量器扩大视口高度，并下发芯片硬件裁切
+                    if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
+                        ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(zoom);
                     }
                     renderView.setScaleX(1.0f);
                     renderView.setScaleY(1.0f);
-                    FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                            targetWidth,
-                            targetHeight,
-                            Gravity.CENTER);
-                    renderView.setLayoutParams(lp);
                     com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(cropTop, cropLeft, cropBottom, cropRight);
                 } else {
-                    // 节点只读设备（如未提权的小米电视 4A）
+                    // 权限受限的只读设备
                     if (renderView instanceof SurfaceView) {
                         if (!hasShownUnsupportedZoomToast) {
                             hasShownUnsupportedZoomToast = true;
                             Toast.makeText(mContext, "当前设备在SurfaceView下受系统权限限制，暂不支持等比放大", Toast.LENGTH_SHORT).show();
                         }
                     } else {
-                        // TextureView 模式：正常支持 View 矩阵等比缩放
-                        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                                baseWidth,
-                                baseHeight,
-                                Gravity.CENTER);
-                        renderView.setLayoutParams(lp);
-                        renderView.setPivotX(baseWidth / 2.0f);
-                        renderView.setPivotY(baseHeight / 2.0f);
+                        // TextureView 模式走矩阵变换
                         renderView.setScaleX(zoom);
                         renderView.setScaleY(zoom);
                     }
                 }
-
-                renderView.requestLayout();
             }
         });
     }
