@@ -51,16 +51,14 @@ public class MeasureHelper {
                     height = width * mVideoHeight / mVideoWidth;
                 }
 
-                // 核心解药：在放大状态下，允许视口高度/宽度按 zoom 等比外扩，收窄黑边
+                // 核心：若处于放大状态，允许根据 zoom 扩展视口，消除黑边死锁
                 if (mVideoZoom > 1.0f) {
                     float videoRatio = (float) mVideoWidth / (float) mVideoHeight;
                     float containerRatio = (float) View.MeasureSpec.getSize(widthMeasureSpec) / (float) View.MeasureSpec.getSize(heightMeasureSpec);
                     if (videoRatio > containerRatio) {
-                        // 宽荧幕大片：高度随 zoom 同步扩展，黑边对称收窄
                         int maxH = View.MeasureSpec.getSize(heightMeasureSpec);
                         height = Math.min((int) Math.round(height * mVideoZoom), maxH);
                     } else {
-                        // 窄幅片源：宽度随 zoom 同步扩展
                         int maxW = View.MeasureSpec.getSize(widthMeasureSpec);
                         width = Math.min((int) Math.round(width * mVideoZoom), maxW);
                     }
