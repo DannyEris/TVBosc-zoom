@@ -583,7 +583,7 @@ public class PlayFragment extends BaseLazyFragment {
                     return;
                 }
 
-                // 1.0x 重置状态
+                // 1.0x 重置状态：清除芯片裁切，复位视口
                 if (Math.abs(zoom - 1.0f) < 0.01f) {
                     int originalScale = mVodPlayerCfg != null ? mVodPlayerCfg.optInt("sc", 0) : xyz.doikki.videoplayer.player.VideoView.SCREEN_SCALE_DEFAULT;
                     if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
@@ -592,13 +592,6 @@ public class PlayFragment extends BaseLazyFragment {
                     renderView.setScaleX(1.0f);
                     renderView.setScaleY(1.0f);
                     com.github.tvbox.osc.util.AmlogicCropHelper.resetCrop();
-
-                    // 补齐：还原 ExoPlayer 解码器为默认自适应加黑边模式 (Mode 1)
-                    xyz.doikki.videoplayer.player.AbstractPlayer player = mVideoView != null ? mVideoView.getMediaPlayer() : null;
-                    if (player instanceof com.github.tvbox.osc.player.ExoPlayer) {
-                        ((com.github.tvbox.osc.player.ExoPlayer) player).setVideoScalingMode(1);
-                    }
-
                     hasShownUnsupportedZoomToast = false;
                     handleScreenScaleCrop(originalScale);
                     return;
@@ -636,7 +629,7 @@ public class PlayFragment extends BaseLazyFragment {
                 }
 
                 if (com.github.tvbox.osc.util.AmlogicCropHelper.isSupported()) {
-                    // Tx9 Pro 等具备节点权限的设备：锁定视口 + 底层 VPP 节点硬件裁切
+                    // Tx9 Pro 等支持节点控制的设备：放行视口高度并下发芯片硬件裁切 (满血等比)
                     if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
                         ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(zoom);
                     }
@@ -644,22 +637,21 @@ public class PlayFragment extends BaseLazyFragment {
                     renderView.setScaleY(1.0f);
                     com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(cropTop, cropLeft, cropBottom, cropRight);
                 } else {
-                    // 小米电视 4A 等无 Root 权限设备：全正坐标安全视口 + MediaCodec 原生硬解裁切 (Mode 2)
+                    // 小米电视 4A 等无写入权限设备：智能防御
                     if (renderView instanceof SurfaceView) {
-                        // 1. 扩大视口高度（收窄黑边，横向死锁在 1920 绝对不越界产生负坐标）
+                        // 强制锁定 1.0x 原始等比视口，严禁单向拉伸高度造成人物拉长畸变
                         if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
-                            ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(zoom);
+                            ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(1.0f);
                         }
                         renderView.setScaleX(1.0f);
                         renderView.setScaleY(1.0f);
 
-                        // 2. 激活 Android 底层原生硬解裁切模式 (C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING = 2)
-                        xyz.doikki.videoplayer.player.AbstractPlayer player = mVideoView != null ? mVideoView.getMediaPlayer() : null;
-                        if (player instanceof com.github.tvbox.osc.player.ExoPlayer) {
-                            ((com.github.tvbox.osc.player.ExoPlayer) player).setVideoScalingMode(2);
+                        if (!hasShownUnsupportedZoomToast) {
+                            hasShownUnsupportedZoomToast = true;
+                            Toast.makeText(mContext, "当前设备受系统驱动限制，已保持原始点对点等比播放", Toast.LENGTH_SHORT).show();
                         }
                     } else {
-                        // TextureView 模式
+                        // TextureView 模式 (针对常规 1080P/720P 片源走矩阵等比缩放)
                         renderView.setScaleX(zoom);
                         renderView.setScaleY(zoom);
                     }
@@ -669,12 +661,11 @@ public class PlayFragment extends BaseLazyFragment {
     }
 
     /**
-     * 联动底栏“画面比例”切换：当选择“裁剪”且处于晶晨芯片时，启用芯片硬件裁剪消除黑边且防拉伸
+     * 联动底栏“画面比例”切换
      */
     private void handleScreenScaleCrop(int scaleType) {
         if (!com.github.tvbox.osc.util.AmlogicCropHelper.isSupported()) return;
 
-        // VideoView.SCREEN_SCALE_CENTER_CROP 对应常数 5
         if (scaleType == VideoView.SCREEN_SCALE_CENTER_CROP) {
             int videoWidth = 0;
             int videoHeight = 0;
@@ -697,14 +688,12 @@ public class PlayFragment extends BaseLazyFragment {
             float containerRatio = (float) containerWidth / (float) containerHeight;
 
             if (videoRatio > containerRatio) {
-                // 宽荧幕片源做满屏裁切：高度填满 1080，左右裁切多余宽度
                 int activeVideoWidth = Math.round(videoHeight * containerRatio);
                 int totalCropX = videoWidth - activeVideoWidth;
                 int cropLeft = totalCropX / 2;
                 int cropRight = totalCropX - cropLeft;
                 com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(0, cropLeft, 0, cropRight);
             } else {
-                // 窄画幅片源做满屏裁切：宽度填满 1920，上下裁切多余高度
                 int activeVideoHeight = Math.round(videoWidth / containerRatio);
                 int totalCropY = videoHeight - activeVideoHeight;
                 int cropTop = totalCropY / 2;
@@ -712,7 +701,6 @@ public class PlayFragment extends BaseLazyFragment {
                 com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(cropTop, 0, cropBottom, 0);
             }
         } else {
-            // 其他比例模式（默认、16:9、4:3、填充）复位芯片硬件裁切
             if (mController != null && Math.abs(mController.getCurrentZoom() - 1.0f) < 0.01f) {
                 com.github.tvbox.osc.util.AmlogicCropHelper.resetCrop();
             }
