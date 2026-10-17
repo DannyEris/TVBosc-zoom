@@ -602,7 +602,7 @@ public class PlayFragment extends BaseLazyFragment {
                     renderView.setLayoutParams(lp);
                     renderView.requestLayout();
                     hasShownUnsupportedZoomToast = false;
-                    handleScreenScaleCrop(mVodPlayerCfg != null ? mVodPlayerCfg.optInt("sc", 0) : 0);
+                    handleScreenScaleCrop(originalScale);
                     return;
                 }
 
@@ -660,7 +660,10 @@ public class PlayFragment extends BaseLazyFragment {
                 }
 
                 if (com.github.tvbox.osc.util.AmlogicCropHelper.isSupported()) {
-                    // 晶晨芯片（如 Tx9 Pro）：安全物理视口 + VPP 硬件裁切
+                    // 关键：放行视口高度，禁止 MeasureHelper 强行压缩回 803px
+                    if (renderView instanceof xyz.doikki.videoplayer.render.IRenderView) {
+                        ((xyz.doikki.videoplayer.render.IRenderView) renderView).setScaleType(xyz.doikki.videoplayer.player.VideoView.SCREEN_SCALE_MATCH_PARENT);
+                    }
                     renderView.setScaleX(1.0f);
                     renderView.setScaleY(1.0f);
                     FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
