@@ -154,6 +154,7 @@ public class PlayFragment extends BaseLazyFragment {
     private ImageView mPlayLoadErr;
     private ProgressBar mPlayLoading;
     private VodController mController;
+    private boolean hasShownUnsupportedZoomToast = false;
     private SourceViewModel sourceViewModel;
     private Observer<JSONObject> playResultObserver;
     private JSONObject qualityResult;
@@ -405,6 +406,8 @@ public class PlayFragment extends BaseLazyFragment {
             public void updatePlayerCfg() {
                 mVodInfo.playerCfg = mVodPlayerCfg.toString();
                 EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_REFRESH, mVodPlayerCfg));
+                // 联动底栏画面比例切换
+                handleScreenScaleCrop(mVodPlayerCfg.optInt("sc", 0));
             }
 
             @Override
@@ -529,6 +532,7 @@ public class PlayFragment extends BaseLazyFragment {
         mVideoView.setVideoController(mController);
     }
 
+    
     /**
      * 针对多平台渲染特性分流适配的等比缩放
      */
@@ -597,6 +601,8 @@ public class PlayFragment extends BaseLazyFragment {
                             Gravity.CENTER);
                     renderView.setLayoutParams(lp);
                     renderView.requestLayout();
+                    hasShownUnsupportedZoomToast = false;
+                    handleScreenScaleCrop(mVodPlayerCfg != null ? mVodPlayerCfg.optInt("sc", 0) : 0);
                     return;
                 }
 
@@ -654,7 +660,7 @@ public class PlayFragment extends BaseLazyFragment {
                 }
 
                 if (com.github.tvbox.osc.util.AmlogicCropHelper.isSupported()) {
-                    // 支持硬件裁切节点（如 Tx9 Pro）：锁定安全物理视口 + VPP 硬件裁切
+                    // 晶晨芯片（如 Tx9 Pro）：安全物理视口 + VPP 硬件裁切
                     renderView.setScaleX(1.0f);
                     renderView.setScaleY(1.0f);
                     FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
@@ -664,21 +670,80 @@ public class PlayFragment extends BaseLazyFragment {
                     renderView.setLayoutParams(lp);
                     com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(cropTop, cropLeft, cropBottom, cropRight);
                 } else {
-                    // 节点只读或定制系统（如 M19、小米电视 4A）：使用 View 矩阵等比缩放
-                    FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                            baseWidth,
-                            baseHeight,
-                            Gravity.CENTER);
-                    renderView.setLayoutParams(lp);
-                    renderView.setPivotX(baseWidth / 2.0f);
-                    renderView.setPivotY(baseHeight / 2.0f);
-                    renderView.setScaleX(zoom);
-                    renderView.setScaleY(zoom);
+                    // 节点只读设备（如未提权的小米电视 4A）
+                    if (renderView instanceof SurfaceView) {
+                        if (!hasShownUnsupportedZoomToast) {
+                            hasShownUnsupportedZoomToast = true;
+                            Toast.makeText(mContext, "当前设备在SurfaceView下受系统权限限制，暂不支持等比放大", Toast.LENGTH_SHORT).show();
+                        }
+                    } else {
+                        // TextureView 模式：正常支持 View 矩阵等比缩放
+                        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                                baseWidth,
+                                baseHeight,
+                                Gravity.CENTER);
+                        renderView.setLayoutParams(lp);
+                        renderView.setPivotX(baseWidth / 2.0f);
+                        renderView.setPivotY(baseHeight / 2.0f);
+                        renderView.setScaleX(zoom);
+                        renderView.setScaleY(zoom);
+                    }
                 }
 
                 renderView.requestLayout();
             }
         });
+    }
+
+    /**
+     * 联动底栏“画面比例”切换：当选择“裁剪”且处于晶晨芯片时，启用芯片硬件裁剪消除黑边且防拉伸
+     */
+    private void handleScreenScaleCrop(int scaleType) {
+        if (!com.github.tvbox.osc.util.AmlogicCropHelper.isSupported()) return;
+
+        // VideoView.SCREEN_SCALE_CENTER_CROP 对应常数 5
+        if (scaleType == VideoView.SCREEN_SCALE_CENTER_CROP) {
+            int videoWidth = 0;
+            int videoHeight = 0;
+            int[] size = mVideoView != null ? mVideoView.getVideoSize() : null;
+            if (size != null && size.length >= 2) {
+                videoWidth = size[0];
+                videoHeight = size[1];
+            }
+            if (videoWidth <= 0 || videoHeight <= 0) return;
+
+            int containerWidth = mVideoView.getWidth();
+            int containerHeight = mVideoView.getHeight();
+            if (containerWidth <= 0 || containerHeight <= 0) {
+                android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+                containerWidth = dm.widthPixels;
+                containerHeight = dm.heightPixels;
+            }
+
+            float videoRatio = (float) videoWidth / (float) videoHeight;
+            float containerRatio = (float) containerWidth / (float) containerHeight;
+
+            if (videoRatio > containerRatio) {
+                // 宽荧幕片源做满屏裁切：高度填满 1080，左右裁切多余宽度
+                int activeVideoWidth = Math.round(videoHeight * containerRatio);
+                int totalCropX = videoWidth - activeVideoWidth;
+                int cropLeft = totalCropX / 2;
+                int cropRight = totalCropX - cropLeft;
+                com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(0, cropLeft, 0, cropRight);
+            } else {
+                // 窄画幅片源做满屏裁切：宽度填满 1920，上下裁切多余高度
+                int activeVideoHeight = Math.round(videoWidth / containerRatio);
+                int totalCropY = videoHeight - activeVideoHeight;
+                int cropTop = totalCropY / 2;
+                int cropBottom = totalCropY - cropTop;
+                com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(cropTop, 0, cropBottom, 0);
+            }
+        } else {
+            // 其他比例模式（默认、16:9、4:3、填充）复位芯片硬件裁切
+            if (mController != null && Math.abs(mController.getCurrentZoom() - 1.0f) < 0.01f) {
+                com.github.tvbox.osc.util.AmlogicCropHelper.resetCrop();
+            }
+        }
     }
     
     private View findRenderView(ViewGroup root) {
