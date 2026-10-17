@@ -592,6 +592,13 @@ public class PlayFragment extends BaseLazyFragment {
                     renderView.setScaleX(1.0f);
                     renderView.setScaleY(1.0f);
                     com.github.tvbox.osc.util.AmlogicCropHelper.resetCrop();
+
+                    // 补齐：还原 ExoPlayer 解码器为默认自适应加黑边模式 (Mode 1)
+                    xyz.doikki.videoplayer.player.AbstractPlayer player = mVideoView != null ? mVideoView.getMediaPlayer() : null;
+                    if (player instanceof com.github.tvbox.osc.player.ExoPlayer) {
+                        ((com.github.tvbox.osc.player.ExoPlayer) player).setVideoScalingMode(1);
+                    }
+
                     hasShownUnsupportedZoomToast = false;
                     handleScreenScaleCrop(originalScale);
                     return;
@@ -2213,6 +2220,9 @@ public class PlayFragment extends BaseLazyFragment {
     public void play(boolean reset) {        
         if(mVodInfo==null)return;
         com.github.tvbox.osc.util.AmlogicCropHelper.resetCrop();
+        if (mVideoView != null && mVideoView.getMediaPlayer() instanceof com.github.tvbox.osc.player.ExoPlayer) {
+            ((com.github.tvbox.osc.player.ExoPlayer) mVideoView.getMediaPlayer()).setVideoScalingMode(1);
+        }
         boolean reusePlayer = reusePlayerOnSwitch && !releasePlayerOnSwitch;
         reusePlayerOnSwitch = false;
         releasePlayerOnSwitch = false;
