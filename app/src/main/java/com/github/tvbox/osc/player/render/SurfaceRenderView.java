@@ -16,7 +16,6 @@ import xyz.doikki.videoplayer.render.MeasureHelper;
 
 public class SurfaceRenderView extends SurfaceView implements IRenderView, SurfaceHolder.Callback {
     private MeasureHelper mMeasureHelper;
-
     private AbstractPlayer mMediaPlayer;
 
     public SurfaceRenderView(Context context) {
@@ -67,6 +66,16 @@ public class SurfaceRenderView extends SurfaceView implements IRenderView, Surfa
         requestLayout();
     }
 
+    /**
+     * 传递缩放倍率给底层度量器
+     */
+    public void setVideoZoom(float zoom) {
+        if (mMeasureHelper != null) {
+            mMeasureHelper.setVideoZoom(zoom);
+            requestLayout();
+        }
+    }
+
     @Override
     public View getView() {
         return this;
@@ -78,9 +87,7 @@ public class SurfaceRenderView extends SurfaceView implements IRenderView, Surfa
     }
 
     @Override
-    public void release() {
-
-    }
+    public void release() {}
 
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
