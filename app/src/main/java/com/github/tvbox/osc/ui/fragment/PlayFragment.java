@@ -532,7 +532,6 @@ public class PlayFragment extends BaseLazyFragment {
         mVideoView.setVideoController(mController);
     }
 
-    
     /**
      * 针对多平台渲染特性分流适配的等比缩放
      */
@@ -543,6 +542,7 @@ public class PlayFragment extends BaseLazyFragment {
             public void run() {
                 if (mVideoView == null) return;
 
+                // 确保外层包裹容器本身不产生形变
                 if (mVideoView.getScaleX() != 1.0f || mVideoView.getScaleY() != 1.0f) {
                     mVideoView.setScaleX(1.0f);
                     mVideoView.setScaleY(1.0f);
@@ -583,7 +583,13 @@ public class PlayFragment extends BaseLazyFragment {
                     return;
                 }
 
-                // 1.0x 重置状态：清除芯片裁切，复位视口
+                // 允许放大后内容溢出父布局边界
+                if (renderView.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) renderView.getParent()).setClipChildren(false);
+                }
+                mVideoView.setClipChildren(false);
+
+                // 1.0x 重置状态：清除芯片硬件裁切，复位视口与矩阵
                 if (Math.abs(zoom - 1.0f) < 0.01f) {
                     int originalScale = mVodPlayerCfg != null ? mVodPlayerCfg.optInt("sc", 0) : xyz.doikki.videoplayer.player.VideoView.SCREEN_SCALE_DEFAULT;
                     if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
@@ -629,7 +635,7 @@ public class PlayFragment extends BaseLazyFragment {
                 }
 
                 if (com.github.tvbox.osc.util.AmlogicCropHelper.isSupported()) {
-                    // Tx9 Pro 等支持节点控制的设备：放行视口高度并下发芯片硬件裁切 (满血等比)
+                    // 通路 1（有 Root / 晶晨节点可写）：放行视口高度并下发芯片 VPP 硬件裁切 (满血零损耗)
                     if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
                         ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(zoom);
                     }
@@ -637,28 +643,19 @@ public class PlayFragment extends BaseLazyFragment {
                     renderView.setScaleY(1.0f);
                     com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(cropTop, cropLeft, cropBottom, cropRight);
                 } else {
-                    // 小米电视 4A 等无写入权限设备：智能防御
-                    if (renderView instanceof SurfaceView) {
-                        // 强制锁定 1.0x 原始等比视口，严禁单向拉伸高度造成人物拉长畸变
-                        if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
-                            ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(1.0f);
-                        }
-                        renderView.setScaleX(1.0f);
-                        renderView.setScaleY(1.0f);
+                    // 通路 2（无 Root / 封闭设备）：常规 View 矩阵缩放，并在 SurfaceView 下提供温和提示
+                    renderView.setScaleX(zoom);
+                    renderView.setScaleY(zoom);
 
-                        if (!hasShownUnsupportedZoomToast) {
-                            hasShownUnsupportedZoomToast = true;
-                            Toast.makeText(mContext, "当前设备受系统驱动限制，已保持原始点对点等比播放", Toast.LENGTH_SHORT).show();
-                        }
-                    } else {
-                        // TextureView 模式 (针对常规 1080P/720P 片源走矩阵等比缩放)
-                        renderView.setScaleX(zoom);
-                        renderView.setScaleY(zoom);
+                    if (renderView instanceof SurfaceView && !hasShownUnsupportedZoomToast) {
+                        hasShownUnsupportedZoomToast = true;
+                        Toast.makeText(mContext, "若画面拉伸变形，请在设置中切换为TextureView模式", Toast.LENGTH_LONG).show();
                     }
                 }
             }
         });
     }
+    
 
     /**
      * 联动底栏“画面比例”切换
