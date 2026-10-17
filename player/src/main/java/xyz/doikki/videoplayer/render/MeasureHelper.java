@@ -9,6 +9,7 @@ public class MeasureHelper {
     private int mVideoHeight;
     private int mCurrentScreenScale;
     private int mVideoRotationDegree;
+    private float mVideoZoom = 1.0f;
 
     public void setVideoRotation(int videoRotationDegree) {
         mVideoRotationDegree = videoRotationDegree;
@@ -21,6 +22,10 @@ public class MeasureHelper {
 
     public void setScreenScale(int screenScale) {
         mCurrentScreenScale = screenScale;
+    }
+
+    public void setVideoZoom(float zoom) {
+        mVideoZoom = zoom;
     }
 
     public int[] doMeasure(int widthMeasureSpec, int heightMeasureSpec) {
@@ -40,11 +45,25 @@ public class MeasureHelper {
         switch (mCurrentScreenScale) {
             case VideoView.SCREEN_SCALE_DEFAULT:
             default:
-                // 严格维持视频原生的物理宽高比，绝不在度量层产生畸变视口
                 if (mVideoWidth * height < width * mVideoHeight) {
                     width = height * mVideoWidth / mVideoHeight;
                 } else if (mVideoWidth * height > width * mVideoHeight) {
                     height = width * mVideoHeight / mVideoWidth;
+                }
+
+                // 核心解药：在放大状态下，允许视口高度/宽度按 zoom 等比外扩，收窄黑边
+                if (mVideoZoom > 1.0f) {
+                    float videoRatio = (float) mVideoWidth / (float) mVideoHeight;
+                    float containerRatio = (float) View.MeasureSpec.getSize(widthMeasureSpec) / (float) View.MeasureSpec.getSize(heightMeasureSpec);
+                    if (videoRatio > containerRatio) {
+                        // 宽荧幕大片：高度随 zoom 同步扩展，黑边对称收窄
+                        int maxH = View.MeasureSpec.getSize(heightMeasureSpec);
+                        height = Math.min((int) Math.round(height * mVideoZoom), maxH);
+                    } else {
+                        // 窄幅片源：宽度随 zoom 同步扩展
+                        int maxW = View.MeasureSpec.getSize(widthMeasureSpec);
+                        width = Math.min((int) Math.round(width * mVideoZoom), maxW);
+                    }
                 }
                 break;
             case VideoView.SCREEN_SCALE_ORIGINAL:
