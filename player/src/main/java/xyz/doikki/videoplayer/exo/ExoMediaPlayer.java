@@ -383,6 +383,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             int index,
                             long presentationTimeUs) {
                         mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
+                        mRenderedFrameCount++; // 补上此行，确保全通道出帧率统计不归零
                         mStallRescueStep = 0;
                         super.renderOutputBuffer(codec, index, presentationTimeUs);
                     }
