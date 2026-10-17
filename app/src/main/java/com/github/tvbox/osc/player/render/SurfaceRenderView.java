@@ -67,6 +67,13 @@ public class SurfaceRenderView extends SurfaceView implements IRenderView, Surfa
         requestLayout();
     }
 
+    public void setVideoZoom(float zoom) {
+        if (mMeasureHelper != null) {
+            mMeasureHelper.setVideoZoom(zoom);
+            requestLayout();
+        }
+    }
+
     @Override
     public View getView() {
         return this;
