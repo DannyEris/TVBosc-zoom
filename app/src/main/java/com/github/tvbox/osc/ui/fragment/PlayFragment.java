@@ -629,7 +629,7 @@ public class PlayFragment extends BaseLazyFragment {
                 }
 
                 if (com.github.tvbox.osc.util.AmlogicCropHelper.isSupported()) {
-                    // 晶晨芯片：通知底层度量器扩大视口高度，并下发芯片硬件裁切
+                    // Tx9 Pro 等具备节点权限的设备：锁定视口 + 底层 VPP 节点硬件裁切
                     if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
                         ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(zoom);
                     }
@@ -637,14 +637,22 @@ public class PlayFragment extends BaseLazyFragment {
                     renderView.setScaleY(1.0f);
                     com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(cropTop, cropLeft, cropBottom, cropRight);
                 } else {
-                    // 权限受限的只读设备
+                    // 小米电视 4A 等无 Root 权限设备：全正坐标安全视口 + MediaCodec 原生硬解裁切 (Mode 2)
                     if (renderView instanceof SurfaceView) {
-                        if (!hasShownUnsupportedZoomToast) {
-                            hasShownUnsupportedZoomToast = true;
-                            Toast.makeText(mContext, "当前设备在SurfaceView下受系统权限限制，暂不支持等比放大", Toast.LENGTH_SHORT).show();
+                        // 1. 扩大视口高度（收窄黑边，横向死锁在 1920 绝对不越界产生负坐标）
+                        if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
+                            ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(zoom);
+                        }
+                        renderView.setScaleX(1.0f);
+                        renderView.setScaleY(1.0f);
+
+                        // 2. 激活 Android 底层原生硬解裁切模式 (C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING = 2)
+                        xyz.doikki.videoplayer.player.AbstractPlayer player = mVideoView != null ? mVideoView.getMediaPlayer() : null;
+                        if (player instanceof com.github.tvbox.osc.player.ExoPlayer) {
+                            ((com.github.tvbox.osc.player.ExoPlayer) player).setVideoScalingMode(2);
                         }
                     } else {
-                        // TextureView 模式走矩阵变换
+                        // TextureView 模式
                         renderView.setScaleX(zoom);
                         renderView.setScaleY(zoom);
                     }
