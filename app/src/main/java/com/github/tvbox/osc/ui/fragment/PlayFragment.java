@@ -600,25 +600,33 @@ public class PlayFragment extends BaseLazyFragment {
                 }
                 mVideoView.setClipChildren(false);
 
-                // 1. 将 SurfaceView 的物理尺寸严格锁死在真实比例基准 (baseWidth × baseHeight)
-                // 坐标从 0 开始，绝不产生负坐标，彻底杜绝 Amlogic 芯片 HWC 的左右截断
-                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                        baseWidth,
-                        baseHeight,
-                        Gravity.CENTER);
-                renderView.setLayoutParams(lp);
-
-                // 2. 轴心锁定中心，通过 View 硬件合成层同步对 X 和 Y 施加等倍率变换
-                renderView.setPivotX(baseWidth / 2.0f);
-                renderView.setPivotY(baseHeight / 2.0f);
-                renderView.setScaleX(zoom);
-                renderView.setScaleY(zoom);
+                if (Math.abs(zoom - 1.0f) < 0.01f) {
+                    // 1.0x 重置状态：恢复为全屏自适应布局，放行菜单中的常规画面比例切换（16:9 / 4:3 等）
+                    renderView.setScaleX(1.0f);
+                    renderView.setScaleY(1.0f);
+                    FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            Gravity.CENTER);
+                    renderView.setLayoutParams(lp);
+                } else {
+                    // 放大/缩小状态：锁定在基准尺寸视口内，严格使用中心 Pivot 进行等比矩阵缩放，防止单边锁死拉伸
+                    FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                            baseWidth,
+                            baseHeight,
+                            Gravity.CENTER);
+                    renderView.setLayoutParams(lp);
+                    renderView.setPivotX(baseWidth / 2.0f);
+                    renderView.setPivotY(baseHeight / 2.0f);
+                    renderView.setScaleX(zoom);
+                    renderView.setScaleY(zoom);
+                }
 
                 renderView.requestLayout();
             }
         });
     }
-
+    
     private View findRenderView(ViewGroup root) {
         if (root == null) return null;
         for (int i = 0; i < root.getChildCount(); i++) {
