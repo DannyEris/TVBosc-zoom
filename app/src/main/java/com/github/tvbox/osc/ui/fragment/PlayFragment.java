@@ -530,7 +530,7 @@ public class PlayFragment extends BaseLazyFragment {
     }
 
     /**
-     * 针对晶晨 Amlogic 芯片（小米电视 4A、Tx9 pro、天猫魔盒 M19）全面优化的防拉伸等比缩放
+     * 针对 Amlogic 晶晨平台（Tx9 pro、小米电视 4A、天猫魔盒 M19）全面优化的严格等比缩放
      */
     private void applyVideoZoom(final float zoom) {
         if (mVideoView == null) return;
@@ -539,23 +539,7 @@ public class PlayFragment extends BaseLazyFragment {
             public void run() {
                 if (mVideoView == null) return;
 
-                // 1. 设置底层 ExoPlayer 的硬解码等比裁切模式
-                AbstractPlayer player = mVideoView.getMediaPlayer();
-                if (player != null) {
-                    int scaleMode = (zoom > 1.01f)
-                            ? com.google.android.exoplayer2.C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
-                            : com.google.android.exoplayer2.C.VIDEO_SCALING_MODE_SCALE_TO_FIT;
-                    if (player instanceof xyz.doikki.videoplayer.exo.ExoMediaPlayer) {
-                        ((xyz.doikki.videoplayer.exo.ExoMediaPlayer) player).setVideoScalingMode(scaleMode);
-                    } else {
-                        try {
-                            java.lang.reflect.Method m = player.getClass().getMethod("setVideoScalingMode", int.class);
-                            m.invoke(player, scaleMode);
-                        } catch (Throwable ignored) {}
-                    }
-                }
-
-                // 2. 保证外部父容器不发生矩阵偏移变形
+                // 确保外层播放器容器与 UI 控件层绝对不发生几何形变
                 if (mVideoView.getScaleX() != 1.0f || mVideoView.getScaleY() != 1.0f) {
                     mVideoView.setScaleX(1.0f);
                     mVideoView.setScaleY(1.0f);
@@ -568,25 +552,68 @@ public class PlayFragment extends BaseLazyFragment {
                 final View renderView = findRenderView(mVideoView);
                 if (renderView == null) return;
 
-                renderView.setScaleX(1.0f);
-                renderView.setScaleY(1.0f);
-
-                // 3. 将 Zoom 倍率下发至底层 MeasureHelper 进行安全限幅测算
-                if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
-                    ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(zoom);
-                } else {
-                    try {
-                        java.lang.reflect.Method m = renderView.getClass().getMethod("setVideoZoom", float.class);
-                        m.invoke(renderView, zoom);
-                    } catch (Throwable ignored) {}
+                int containerWidth = mVideoView.getWidth();
+                int containerHeight = mVideoView.getHeight();
+                if (containerWidth <= 0 || containerHeight <= 0) {
+                    android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+                    containerWidth = dm.widthPixels;
+                    containerHeight = dm.heightPixels;
                 }
 
-                // 4. 重置为 MATCH_PARENT，由 onMeasure 统一调配绝对防变形视口
+                int videoWidth = 0;
+                int videoHeight = 0;
+                int[] size = mVideoView.getVideoSize();
+                if (size != null && size.length >= 2) {
+                    videoWidth = size[0];
+                    videoHeight = size[1];
+                }
+
+                if (videoWidth <= 0 || videoHeight <= 0) {
+                    mVideoView.postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (mController != null) {
+                                applyVideoZoom(mController.getCurrentZoom());
+                            }
+                        }
+                    }, 300);
+                    return;
+                }
+
+                // 计算不溢出物理屏幕的标准自适应基准宽高 (如 2582x1080 对应 1920x803)
+                float videoRatio = (float) videoWidth / (float) videoHeight;
+                float containerRatio = (float) containerWidth / (float) containerHeight;
+                int baseWidth;
+                int baseHeight;
+
+                if (videoRatio > containerRatio) {
+                    baseWidth = containerWidth;
+                    baseHeight = Math.round(containerWidth / videoRatio);
+                } else {
+                    baseHeight = containerHeight;
+                    baseWidth = Math.round(containerHeight * videoRatio);
+                }
+
+                // 允许放大时边缘溢出父容器
+                if (renderView.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) renderView.getParent()).setClipChildren(false);
+                }
+                mVideoView.setClipChildren(false);
+
+                // 1. 将 SurfaceView 的物理尺寸严格锁死在真实比例基准 (baseWidth × baseHeight)
+                // 坐标从 0 开始，绝不产生负坐标，彻底杜绝 Amlogic 芯片 HWC 的左右截断
                 FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        baseWidth,
+                        baseHeight,
                         Gravity.CENTER);
                 renderView.setLayoutParams(lp);
+
+                // 2. 轴心锁定中心，通过 View 硬件合成层同步对 X 和 Y 施加等倍率变换
+                renderView.setPivotX(baseWidth / 2.0f);
+                renderView.setPivotY(baseHeight / 2.0f);
+                renderView.setScaleX(zoom);
+                renderView.setScaleY(zoom);
+
                 renderView.requestLayout();
             }
         });
