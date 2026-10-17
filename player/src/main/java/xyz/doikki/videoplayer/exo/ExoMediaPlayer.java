@@ -858,4 +858,10 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
         return mCurrentRealFps;
     }
+    // 动态调整 ExoPlayer 底层解码器硬件裁切模式
+    public void setVideoScalingMode(int videoScalingMode) {
+        if (mInternalPlayer != null) {
+            mInternalPlayer.setVideoScalingMode(videoScalingMode);
+        }
+    }
 }
