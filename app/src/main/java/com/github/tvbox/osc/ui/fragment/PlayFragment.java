@@ -530,7 +530,7 @@ public class PlayFragment extends BaseLazyFragment {
     }
 
     /**
-     * 对标 KODI：按像素计算尺寸并通过 Gravity.CENTER 居中等比缩放
+     * 针对晶晨 Amlogic 芯片（小米电视 4A、Tx9 pro、天猫魔盒 M19）全面优化的防拉伸等比缩放
      */
     private void applyVideoZoom(final float zoom) {
         if (mVideoView == null) return;
@@ -539,7 +539,23 @@ public class PlayFragment extends BaseLazyFragment {
             public void run() {
                 if (mVideoView == null) return;
 
-                // 确保外层容器与 UI 控制层绝对不发生几何变换
+                // 1. 设置底层 ExoPlayer 的硬解码等比裁切模式
+                AbstractPlayer player = mVideoView.getMediaPlayer();
+                if (player != null) {
+                    int scaleMode = (zoom > 1.01f)
+                            ? com.google.android.exoplayer2.C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                            : com.google.android.exoplayer2.C.VIDEO_SCALING_MODE_SCALE_TO_FIT;
+                    if (player instanceof xyz.doikki.videoplayer.exo.ExoMediaPlayer) {
+                        ((xyz.doikki.videoplayer.exo.ExoMediaPlayer) player).setVideoScalingMode(scaleMode);
+                    } else {
+                        try {
+                            java.lang.reflect.Method m = player.getClass().getMethod("setVideoScalingMode", int.class);
+                            m.invoke(player, scaleMode);
+                        } catch (Throwable ignored) {}
+                    }
+                }
+
+                // 2. 保证外部父容器不发生矩阵偏移变形
                 if (mVideoView.getScaleX() != 1.0f || mVideoView.getScaleY() != 1.0f) {
                     mVideoView.setScaleX(1.0f);
                     mVideoView.setScaleY(1.0f);
@@ -552,76 +568,25 @@ public class PlayFragment extends BaseLazyFragment {
                 final View renderView = findRenderView(mVideoView);
                 if (renderView == null) return;
 
-                // 清除原先残留的 View 级 scale，避免硬件合成器偏移
                 renderView.setScaleX(1.0f);
                 renderView.setScaleY(1.0f);
 
-                int containerWidth = mVideoView.getWidth();
-                int containerHeight = mVideoView.getHeight();
-                if (containerWidth <= 0 || containerHeight <= 0) {
-                    android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
-                    containerWidth = dm.widthPixels;
-                    containerHeight = dm.heightPixels;
-                }
-
-                int videoWidth = 0;
-                int videoHeight = 0;
-                int[] size = mVideoView.getVideoSize();
-                if (size != null && size.length >= 2) {
-                    videoWidth = size[0];
-                    videoHeight = size[1];
-                }
-
-                // 若底层渲染尚未就绪或尺寸未上报，延迟300ms重试
-                if (videoWidth <= 0 || videoHeight <= 0) {
-                    mVideoView.postDelayed(new Runnable() {
-                        @Override
-                        public void run() {
-                            if (mController != null) {
-                                applyVideoZoom(mController.getCurrentZoom());
-                            }
-                        }
-                    }, 300);
-                    return;
-                }
-
-                // 计算视频在当前屏幕容器中的原始基准适应尺寸
-                float videoRatio = (float) videoWidth / (float) videoHeight;
-                float containerRatio = (float) containerWidth / (float) containerHeight;
-                int baseWidth;
-                int baseHeight;
-
-                if (videoRatio > containerRatio) {
-                    baseWidth = containerWidth;
-                    baseHeight = Math.round(containerWidth / videoRatio);
+                // 3. 将 Zoom 倍率下发至底层 MeasureHelper 进行安全限幅测算
+                if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
+                    ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(zoom);
                 } else {
-                    baseHeight = containerHeight;
-                    baseWidth = Math.round(containerHeight * videoRatio);
+                    try {
+                        java.lang.reflect.Method m = renderView.getClass().getMethod("setVideoZoom", float.class);
+                        m.invoke(renderView, zoom);
+                    } catch (Throwable ignored) {}
                 }
 
-                // 允许放大视图溢出父边界，保证居中扩展不被父容器剪切
-                if (renderView.getParent() instanceof ViewGroup) {
-                    ((ViewGroup) renderView.getParent()).setClipChildren(false);
-                }
-                mVideoView.setClipChildren(false);
-
-                if (Math.abs(zoom - 1.0f) < 0.01f) {
-                    // 重置：恢复默认全屏自适应并居中
-                    FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            Gravity.CENTER);
-                    renderView.setLayoutParams(lp);
-                } else {
-                    // 缩放：按原始宽高比等比换算目标像素，并通过 Gravity.CENTER 绝对居中
-                    int targetWidth = Math.round(baseWidth * zoom);
-                    int targetHeight = Math.round(baseHeight * zoom);
-                    FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                            targetWidth,
-                            targetHeight,
-                            Gravity.CENTER);
-                    renderView.setLayoutParams(lp);
-                }
+                // 4. 重置为 MATCH_PARENT，由 onMeasure 统一调配绝对防变形视口
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        Gravity.CENTER);
+                renderView.setLayoutParams(lp);
                 renderView.requestLayout();
             }
         });
