@@ -3,6 +3,45 @@ package com.github.tvbox.osc.util;
 import java.io.File;
 import java.io.FileOutputStream;
 
+private static volatile boolean sHasOptimized = false;
+
+    /**
+     * 针对 Amlogic 高刷4K片源的底层总线与功耗优化 (仅在 Root 环境执行一次)
+     */
+    public static void optimizePerformance() {
+        if (sHasOptimized || !isSupported()) return;
+        sHasOptimized = true;
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    // 拼接优化指令：旁路去隔行、关闭重负荷滤镜、开启音画同步保护、限制 CPU 虚高发热
+                    String[] cmds = new String[]{
+                        "echo 1 > /sys/module/di/parameters/bypass_all",
+                        "echo 0 > /sys/class/amvecm/dnlp",
+                        "echo 0 > /sys/class/amvecm/pic_play",
+                        "echo 1 > /sys/class/tsync/enable",
+                        "echo ondemand > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor",
+                        "echo 1000000 > /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq"
+                    };
+
+                    StringBuilder sb = new StringBuilder();
+                    for (String c : cmds) {
+                        sb.append(c).append("\n");
+                    }
+
+                    Process p = Runtime.getRuntime().exec("su");
+                    java.io.DataOutputStream dos = new java.io.DataOutputStream(p.getOutputStream());
+                    dos.writeBytes(sb.toString());
+                    dos.writeBytes("exit\n");
+                    dos.flush();
+                    p.waitFor();
+                } catch (Throwable ignored) {}
+            }
+        }).start();
+    }
+
 public class AmlogicCropHelper {
     private static final String CROP_PATH = "/sys/class/video/crop";
     private static Boolean sIsSupported = null;
