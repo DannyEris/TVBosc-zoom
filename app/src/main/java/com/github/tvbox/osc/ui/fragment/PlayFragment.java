@@ -542,7 +542,6 @@ public class PlayFragment extends BaseLazyFragment {
             public void run() {
                 if (mVideoView == null) return;
 
-                // 确保容器与控制器自身不产生形变与裁剪
                 if (mVideoView.getScaleX() != 1.0f || mVideoView.getScaleY() != 1.0f) {
                     mVideoView.setScaleX(1.0f);
                     mVideoView.setScaleY(1.0f);
@@ -583,7 +582,7 @@ public class PlayFragment extends BaseLazyFragment {
                     return;
                 }
 
-                // 1.0x 重置状态：清除芯片硬件裁切，复位视口与矩阵
+                // 1.0x 重置状态
                 if (Math.abs(zoom - 1.0f) < 0.01f) {
                     int originalScale = mVodPlayerCfg != null ? mVodPlayerCfg.optInt("sc", 0) : xyz.doikki.videoplayer.player.VideoView.SCREEN_SCALE_DEFAULT;
                     if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
@@ -604,26 +603,29 @@ public class PlayFragment extends BaseLazyFragment {
                 int cropLeft = 0;
                 int cropRight = 0;
 
-                if (videoRatio > containerRatio) {
-                    int baseHeight = Math.round(containerWidth / videoRatio);
-                    int targetHeight = Math.min((int) Math.round(baseHeight * zoom), containerHeight);
-                    float displayedRatio = (float) containerWidth / (float) targetHeight;
-                    int activeVideoWidth = Math.round(videoHeight * displayedRatio);
-                    if (activeVideoWidth > videoWidth) activeVideoWidth = videoWidth;
+                // 核心修复：缩小模式 (zoom < 1.0f) 下硬件裁剪参数恒定归零，由 MeasureHelper 等比缩小
+                if (zoom > 1.0f) {
+                    if (videoRatio > containerRatio) {
+                        int baseHeight = Math.round(containerWidth / videoRatio);
+                        int targetHeight = Math.min((int) Math.round(baseHeight * zoom), containerHeight);
+                        float displayedRatio = (float) containerWidth / (float) targetHeight;
+                        int activeVideoWidth = Math.round(videoHeight * displayedRatio);
+                        if (activeVideoWidth > videoWidth) activeVideoWidth = videoWidth;
 
-                    int totalCropX = videoWidth - activeVideoWidth;
-                    cropLeft = totalCropX / 2;
-                    cropRight = totalCropX - cropLeft;
-                } else {
-                    int baseWidth = Math.round(containerHeight * videoRatio);
-                    int targetWidth = Math.min((int) Math.round(baseWidth * zoom), containerWidth);
-                    float displayedRatio = (float) targetWidth / (float) containerHeight;
-                    int activeVideoHeight = Math.round(videoWidth / displayedRatio);
-                    if (activeVideoHeight > videoHeight) activeVideoHeight = videoHeight;
+                        int totalCropX = videoWidth - activeVideoWidth;
+                        cropLeft = (totalCropX / 4) * 2; // 偶数对齐
+                        cropRight = cropLeft;
+                    } else {
+                        int baseWidth = Math.round(containerHeight * videoRatio);
+                        int targetWidth = Math.min((int) Math.round(baseWidth * zoom), containerWidth);
+                        float displayedRatio = (float) targetWidth / (float) containerHeight;
+                        int activeVideoHeight = Math.round(videoWidth / displayedRatio);
+                        if (activeVideoHeight > videoHeight) activeVideoHeight = videoHeight;
 
-                    int totalCropY = videoHeight - activeVideoHeight;
-                    cropTop = totalCropY / 2;
-                    cropBottom = totalCropY - cropTop;
+                        int totalCropY = videoHeight - activeVideoHeight;
+                        cropTop = (totalCropY / 4) * 2; // 偶数对齐
+                        cropBottom = cropTop;
+                    }
                 }
 
                 boolean isHardwareCropSupported = com.github.tvbox.osc.util.AmlogicCropHelper.isSupported();
@@ -632,21 +634,17 @@ public class PlayFragment extends BaseLazyFragment {
                     renderView.setScaleX(1.0f);
                     renderView.setScaleY(1.0f);
 
-                    // 传递缩放比例以及是否支持硬件裁切模式
                     ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(zoom, isHardwareCropSupported);
 
                     if (isHardwareCropSupported) {
-                        // Tx9 Pro: 芯片底层硬件裁切
                         com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(cropTop, cropLeft, cropBottom, cropRight);
                     } else {
-                        // 天猫魔盒 M19 / 小米电视 4A: 不支持底层硬件裁切节点
                         if (!hasShownUnsupportedZoomToast) {
                             hasShownUnsupportedZoomToast = true;
                             Toast.makeText(mContext, "若画面拉伸变形，请在设置中切换为TextureView模式", Toast.LENGTH_SHORT).show();
                         }
                     }
                 } else {
-                    // TextureView 模式 (走标准 GPU View 矩阵等比缩放)
                     renderView.setScaleX(zoom);
                     renderView.setScaleY(zoom);
                 }
@@ -658,7 +656,14 @@ public class PlayFragment extends BaseLazyFragment {
      * 联动底栏“画面比例”切换
      */
     private void handleScreenScaleCrop(int scaleType) {
-        if (!com.github.tvbox.osc.util.AmlogicCropHelper.isSupported()) return;
+        boolean isHardwareCrop = com.github.tvbox.osc.util.AmlogicCropHelper.isSupported();
+        final View renderView = findRenderView(mVideoView);
+
+        if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
+            ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(1.0f, isHardwareCrop);
+        }
+
+        if (!isHardwareCrop) return;
 
         if (scaleType == VideoView.SCREEN_SCALE_CENTER_CROP) {
             int videoWidth = 0;
@@ -684,15 +689,13 @@ public class PlayFragment extends BaseLazyFragment {
             if (videoRatio > containerRatio) {
                 int activeVideoWidth = Math.round(videoHeight * containerRatio);
                 int totalCropX = videoWidth - activeVideoWidth;
-                int cropLeft = totalCropX / 2;
-                int cropRight = totalCropX - cropLeft;
-                com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(0, cropLeft, 0, cropRight);
+                int cropLeft = (totalCropX / 4) * 2; // 偶数对齐
+                com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(0, cropLeft, 0, cropLeft);
             } else {
                 int activeVideoHeight = Math.round(videoWidth / containerRatio);
                 int totalCropY = videoHeight - activeVideoHeight;
-                int cropTop = totalCropY / 2;
-                int cropBottom = totalCropY - cropTop;
-                com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(cropTop, 0, cropBottom, 0);
+                int cropTop = (totalCropY / 4) * 2; // 偶数对齐
+                com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(cropTop, 0, cropTop, 0);
             }
         } else {
             if (mController != null && Math.abs(mController.getCurrentZoom() - 1.0f) < 0.01f) {
