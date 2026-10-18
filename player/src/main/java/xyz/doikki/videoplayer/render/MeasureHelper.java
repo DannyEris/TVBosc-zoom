@@ -56,25 +56,29 @@ public class MeasureHelper {
                     height = width * mVideoHeight / mVideoWidth;
                 }
 
-                // 核心修复：支持双向缩放，并区分硬件芯片裁切与视口外扩
                 if (mVideoZoom > 0 && Math.abs(mVideoZoom - 1.0f) > 0.01f) {
-                    if (mHardwareCropMode) {
-                        // 通路 1（Tx9 Pro 等具备芯片寄存器控制权的设备）：
-                        // 视口单向拓展填满黑边，由 VPP 硬件寄存器执行裁切
-                        float videoRatio = (float) mVideoWidth / (float) mVideoHeight;
-                        float containerRatio = (float) View.MeasureSpec.getSize(widthMeasureSpec) / (float) View.MeasureSpec.getSize(heightMeasureSpec);
-                        if (videoRatio > containerRatio) {
-                            int maxH = View.MeasureSpec.getSize(heightMeasureSpec);
-                            height = Math.min((int) Math.round(height * mVideoZoom), maxH);
-                        } else {
-                            int maxW = View.MeasureSpec.getSize(widthMeasureSpec);
-                            width = Math.min((int) Math.round(width * mVideoZoom), maxW);
-                        }
-                    } else {
-                        // 通路 2（天猫魔盒 M19 等无 Root 节点设备，完美还原 827f78a 机制）：
-                        // 宽高严格同步以 zoom 缩放，保持原本 2.39:1 等比，支持放大与缩小
+                    if (mVideoZoom < 1.0f) {
+                        // 缩小模式（通用）：宽高完全等比缩减，四面留黑，彻底解决上下压缩变扁
                         width = Math.round(width * mVideoZoom);
                         height = Math.round(height * mVideoZoom);
+                    } else {
+                        // 放大模式 (zoom > 1.0f)
+                        if (mHardwareCropMode) {
+                            // Tx9 Pro：视口单向拓展填满黑边，由 VPP 芯片硬件裁剪两侧
+                            float videoRatio = (float) mVideoWidth / (float) mVideoHeight;
+                            float containerRatio = (float) View.MeasureSpec.getSize(widthMeasureSpec) / (float) View.MeasureSpec.getSize(heightMeasureSpec);
+                            if (videoRatio > containerRatio) {
+                                int maxH = View.MeasureSpec.getSize(heightMeasureSpec);
+                                height = Math.min((int) Math.round(height * mVideoZoom), maxH);
+                            } else {
+                                int maxW = View.MeasureSpec.getSize(widthMeasureSpec);
+                                width = Math.min((int) Math.round(width * mVideoZoom), maxW);
+                            }
+                        } else {
+                            // 天猫魔盒 M19：宽高同步以 zoom 放大，走居中视口裁切
+                            width = Math.round(width * mVideoZoom);
+                            height = Math.round(height * mVideoZoom);
+                        }
                     }
                 }
                 break;
@@ -101,10 +105,17 @@ public class MeasureHelper {
                 height = View.MeasureSpec.getSize(heightMeasureSpec);
                 break;
             case VideoView.SCREEN_SCALE_CENTER_CROP:
-                if (mVideoWidth * height > width * mVideoHeight) {
-                    width = height * mVideoWidth / mVideoHeight;
+                if (mHardwareCropMode) {
+                    // 核心修复：具备芯片硬件裁剪时，视口死锁在 1920x1080 满屏安全区！
+                    // 绝不允许外扩产生 -331 负坐标，彻底杜绝双重裁剪引发的 VPU 缓冲区溢出死机
+                    width = View.MeasureSpec.getSize(widthMeasureSpec);
+                    height = View.MeasureSpec.getSize(heightMeasureSpec);
                 } else {
-                    height = width * mVideoHeight / mVideoWidth;
+                    if (mVideoWidth * height > width * mVideoHeight) {
+                        width = height * mVideoWidth / mVideoHeight;
+                    } else {
+                        height = width * mVideoHeight / mVideoWidth;
+                    }
                 }
                 break;
         }
