@@ -56,15 +56,16 @@ public class MeasureHelper {
                     height = width * mVideoHeight / mVideoWidth;
                 }
 
+                // 支持双向缩放：缩小恢复等比，放大按通路分流
                 if (mVideoZoom > 0 && Math.abs(mVideoZoom - 1.0f) > 0.01f) {
                     if (mVideoZoom < 1.0f) {
-                        // 缩小模式（通用）：宽高完全等比缩减，四面留黑，彻底解决上下压缩变扁
+                        // 缩小模式 (zoom < 1.0)：所有平台通用！宽高严格同步按比例缩减，四面自然留黑
                         width = Math.round(width * mVideoZoom);
                         height = Math.round(height * mVideoZoom);
                     } else {
-                        // 放大模式 (zoom > 1.0f)
+                        // 放大模式 (zoom > 1.0)
                         if (mHardwareCropMode) {
-                            // Tx9 Pro：视口单向拓展填满黑边，由 VPP 芯片硬件裁剪两侧
+                            // Tx9 Pro：仅放行视口高度填满上下黑边，左右由 VPP 硬件裁切
                             float videoRatio = (float) mVideoWidth / (float) mVideoHeight;
                             float containerRatio = (float) View.MeasureSpec.getSize(widthMeasureSpec) / (float) View.MeasureSpec.getSize(heightMeasureSpec);
                             if (videoRatio > containerRatio) {
@@ -75,12 +76,13 @@ public class MeasureHelper {
                                 width = Math.min((int) Math.round(width * mVideoZoom), maxW);
                             }
                         } else {
-                            // 天猫魔盒 M19：宽高同步以 zoom 放大，走居中视口裁切
+                            // M19 等无写入权设备：居中等比视口外扩
                             width = Math.round(width * mVideoZoom);
                             height = Math.round(height * mVideoZoom);
                         }
                     }
                 }
+                
                 break;
             case VideoView.SCREEN_SCALE_ORIGINAL:
                 width = mVideoWidth;
