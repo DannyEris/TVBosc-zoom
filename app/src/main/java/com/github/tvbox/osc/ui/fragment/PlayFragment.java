@@ -531,7 +531,7 @@ public class PlayFragment extends BaseLazyFragment {
         });
         mVideoView.setVideoController(mController);
     }
-
+    
     /**
      * 针对多平台渲染特性分流适配的等比缩放
      */
@@ -541,6 +541,16 @@ public class PlayFragment extends BaseLazyFragment {
             @Override
             public void run() {
                 if (mVideoView == null) return;
+
+                // 核心保障 1：外层容器与控制器矩阵严格死锁 1.0f，彻底杜绝 UI 被拉伸或缩小裁切
+                if (mVideoView.getScaleX() != 1.0f || mVideoView.getScaleY() != 1.0f) {
+                    mVideoView.setScaleX(1.0f);
+                    mVideoView.setScaleY(1.0f);
+                }
+                if (mController != null && (mController.getScaleX() != 1.0f || mController.getScaleY() != 1.0f)) {
+                    mController.setScaleX(1.0f);
+                    mController.setScaleY(1.0f);
+                }
 
                 final View renderView = findRenderView(mVideoView);
                 if (renderView == null) return;
@@ -573,7 +583,7 @@ public class PlayFragment extends BaseLazyFragment {
                     return;
                 }
 
-                // 1.0x 重置状态：清除芯片硬件裁切，复位视口与所有层级缩放矩阵
+                // 1.0x 重置状态：清除芯片硬件裁切，复位视口与渲染视图
                 if (Math.abs(zoom - 1.0f) < 0.01f) {
                     int originalScale = mVodPlayerCfg != null ? mVodPlayerCfg.optInt("sc", 0) : xyz.doikki.videoplayer.player.VideoView.SCREEN_SCALE_DEFAULT;
                     if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
@@ -581,12 +591,6 @@ public class PlayFragment extends BaseLazyFragment {
                     }
                     renderView.setScaleX(1.0f);
                     renderView.setScaleY(1.0f);
-                    mVideoView.setScaleX(1.0f);
-                    mVideoView.setScaleY(1.0f);
-                    if (mController != null) {
-                        mController.setScaleX(1.0f);
-                        mController.setScaleY(1.0f);
-                    }
                     com.github.tvbox.osc.util.AmlogicCropHelper.resetCrop();
                     hasShownUnsupportedZoomToast = false;
                     handleScreenScaleCrop(originalScale);
@@ -624,52 +628,33 @@ public class PlayFragment extends BaseLazyFragment {
                     cropBottom = totalCropY - cropTop;
                 }
 
-                if (com.github.tvbox.osc.util.AmlogicCropHelper.isSupported()) {
-                    // 通路 1（Tx9 Pro 等具备芯片控制权设备）：视口扩展 + 硬件寄存器无损裁切
-                    if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
-                        ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(zoom);
-                    }
+                if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
+                    // 核心保障 2：还原 827f78a 验证通过的基准逻辑
+                    // 1. SurfaceView 矩阵死锁 1.0f，绝不产生负坐标，彻底消灭向左上角/右下角漂移
                     renderView.setScaleX(1.0f);
                     renderView.setScaleY(1.0f);
-                    mVideoView.setScaleX(1.0f);
-                    mVideoView.setScaleY(1.0f);
-                    if (mController != null) {
-                        mController.setScaleX(1.0f);
-                        mController.setScaleY(1.0f);
+
+                    // 2. 纯走 MeasureHelper 视口度量高度扩展（在 Gravity.CENTER 约束下严格沿正中心上下对称展开）
+                    ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(zoom);
+
+                    // 3. Tx9 Pro 等可写设备无感直通硬件裁切；M19 等设备走 AliOS 原生视口裁切
+                    if (com.github.tvbox.osc.util.AmlogicCropHelper.isSupported()) {
+                        com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(cropTop, cropLeft, cropBottom, cropRight);
+                    } else {
+                        if (!hasShownUnsupportedZoomToast) {
+                            hasShownUnsupportedZoomToast = true;
+                            // 仅针对在特定封闭电视（如小米）上可能产生拉伸的情况给出温和提示
+                            Toast.makeText(mContext, "若画面拉伸变形，请在设置中切换为TextureView模式", Toast.LENGTH_SHORT).show();
+                        }
                     }
-                    com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(cropTop, cropLeft, cropBottom, cropRight);
                 } else {
-                    // 通路 2（天猫魔盒 M19 等无 Root 设备）：完整还原 827f78a 验证通过的容器级全屏居中等比缩放
-                    // 1. 复位局部视口改写，防止与矩阵冲突
-                    if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
-                        ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(1.0f);
-                    }
-                    renderView.setScaleX(1.0f);
-                    renderView.setScaleY(1.0f);
-
-                    // 2. 锁定 1920x1080 屏幕绝对物理中心，彻底消除左上角漂移
-                    mVideoView.setPivotX(containerWidth / 2.0f);
-                    mVideoView.setPivotY(containerHeight / 2.0f);
-                    mVideoView.setScaleX(zoom);
-                    mVideoView.setScaleY(zoom);
-
-                    // 3. 对控制器施加反向抵消矩阵，确保底栏、OSD 与 FPS 悬浮窗大小位置恒定
-                    if (mController != null) {
-                        mController.setPivotX(containerWidth / 2.0f);
-                        mController.setPivotY(containerHeight / 2.0f);
-                        mController.setScaleX(1.0f / zoom);
-                        mController.setScaleY(1.0f / zoom);
-                    }
-
-                    if (renderView instanceof SurfaceView && !hasShownUnsupportedZoomToast) {
-                        hasShownUnsupportedZoomToast = true;
-                        Toast.makeText(mContext, "若画面拉伸变形，请在设置中切换为TextureView模式", Toast.LENGTH_LONG).show();
-                    }
+                    // TextureView 模式：走标准 GPU View 矩阵等比缩放
+                    renderView.setScaleX(zoom);
+                    renderView.setScaleY(zoom);
                 }
             }
         });
     }
-    
 
     /**
      * 联动底栏“画面比例”切换
