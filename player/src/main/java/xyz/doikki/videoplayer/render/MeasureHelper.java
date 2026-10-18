@@ -108,8 +108,7 @@ public class MeasureHelper {
                 break;
             case VideoView.SCREEN_SCALE_CENTER_CROP:
                 if (mHardwareCropMode) {
-                    // 核心修复：具备芯片硬件裁剪时，视口死锁在 1920x1080 满屏安全区！
-                    // 绝不允许外扩产生 -331 负坐标，彻底杜绝双重裁剪引发的 VPU 缓冲区溢出死机
+                    // 具备芯片硬件裁切时，视口严格死锁在 1920x1080 屏幕物理范围，消除负坐标冲突
                     width = View.MeasureSpec.getSize(widthMeasureSpec);
                     height = View.MeasureSpec.getSize(heightMeasureSpec);
                 } else {
