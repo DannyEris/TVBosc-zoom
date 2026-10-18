@@ -194,6 +194,8 @@ public class PlayFragment extends BaseLazyFragment {
 
     @Override
     protected void init() {
+        // 起播前自动调优底层总线与频率
+        com.github.tvbox.osc.util.AmlogicCropHelper.optimizePerformance();
         initView();
         initDanmuView();
         initViewModel();
