@@ -542,16 +542,6 @@ public class PlayFragment extends BaseLazyFragment {
             public void run() {
                 if (mVideoView == null) return;
 
-                // 确保外层包裹容器本身不产生形变
-                if (mVideoView.getScaleX() != 1.0f || mVideoView.getScaleY() != 1.0f) {
-                    mVideoView.setScaleX(1.0f);
-                    mVideoView.setScaleY(1.0f);
-                }
-                if (mController != null && (mController.getScaleX() != 1.0f || mController.getScaleY() != 1.0f)) {
-                    mController.setScaleX(1.0f);
-                    mController.setScaleY(1.0f);
-                }
-
                 final View renderView = findRenderView(mVideoView);
                 if (renderView == null) return;
 
@@ -583,13 +573,7 @@ public class PlayFragment extends BaseLazyFragment {
                     return;
                 }
 
-                // 允许放大后内容溢出父布局边界
-                if (renderView.getParent() instanceof ViewGroup) {
-                    ((ViewGroup) renderView.getParent()).setClipChildren(false);
-                }
-                mVideoView.setClipChildren(false);
-
-                // 1.0x 重置状态：清除芯片硬件裁切，复位视口与矩阵
+                // 1.0x 重置状态：清除芯片硬件裁切，复位视口与所有层级缩放矩阵
                 if (Math.abs(zoom - 1.0f) < 0.01f) {
                     int originalScale = mVodPlayerCfg != null ? mVodPlayerCfg.optInt("sc", 0) : xyz.doikki.videoplayer.player.VideoView.SCREEN_SCALE_DEFAULT;
                     if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
@@ -597,6 +581,12 @@ public class PlayFragment extends BaseLazyFragment {
                     }
                     renderView.setScaleX(1.0f);
                     renderView.setScaleY(1.0f);
+                    mVideoView.setScaleX(1.0f);
+                    mVideoView.setScaleY(1.0f);
+                    if (mController != null) {
+                        mController.setScaleX(1.0f);
+                        mController.setScaleY(1.0f);
+                    }
                     com.github.tvbox.osc.util.AmlogicCropHelper.resetCrop();
                     hasShownUnsupportedZoomToast = false;
                     handleScreenScaleCrop(originalScale);
@@ -635,17 +625,41 @@ public class PlayFragment extends BaseLazyFragment {
                 }
 
                 if (com.github.tvbox.osc.util.AmlogicCropHelper.isSupported()) {
-                    // 通路 1（有 Root / 晶晨节点可写）：放行视口高度并下发芯片 VPP 硬件裁切 (满血零损耗)
+                    // 通路 1（Tx9 Pro 等具备芯片控制权设备）：视口扩展 + 硬件寄存器无损裁切
                     if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
                         ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(zoom);
                     }
                     renderView.setScaleX(1.0f);
                     renderView.setScaleY(1.0f);
+                    mVideoView.setScaleX(1.0f);
+                    mVideoView.setScaleY(1.0f);
+                    if (mController != null) {
+                        mController.setScaleX(1.0f);
+                        mController.setScaleY(1.0f);
+                    }
                     com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(cropTop, cropLeft, cropBottom, cropRight);
                 } else {
-                    // 通路 2（无 Root / 封闭设备）：常规 View 矩阵缩放，并在 SurfaceView 下提供温和提示
-                    renderView.setScaleX(zoom);
-                    renderView.setScaleY(zoom);
+                    // 通路 2（天猫魔盒 M19 等无 Root 设备）：完整还原 827f78a 验证通过的容器级全屏居中等比缩放
+                    // 1. 复位局部视口改写，防止与矩阵冲突
+                    if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
+                        ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(1.0f);
+                    }
+                    renderView.setScaleX(1.0f);
+                    renderView.setScaleY(1.0f);
+
+                    // 2. 锁定 1920x1080 屏幕绝对物理中心，彻底消除左上角漂移
+                    mVideoView.setPivotX(containerWidth / 2.0f);
+                    mVideoView.setPivotY(containerHeight / 2.0f);
+                    mVideoView.setScaleX(zoom);
+                    mVideoView.setScaleY(zoom);
+
+                    // 3. 对控制器施加反向抵消矩阵，确保底栏、OSD 与 FPS 悬浮窗大小位置恒定
+                    if (mController != null) {
+                        mController.setPivotX(containerWidth / 2.0f);
+                        mController.setPivotY(containerHeight / 2.0f);
+                        mController.setScaleX(1.0f / zoom);
+                        mController.setScaleY(1.0f / zoom);
+                    }
 
                     if (renderView instanceof SurfaceView && !hasShownUnsupportedZoomToast) {
                         hasShownUnsupportedZoomToast = true;
