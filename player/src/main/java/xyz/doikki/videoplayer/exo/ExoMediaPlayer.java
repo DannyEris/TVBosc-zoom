@@ -484,10 +484,10 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
         if (path != null) {
-            // 锁定代理并发为 8 线程，全力保障 4K 高码率吞吐
+            // 锁定代理并发为 4 线程，全力保障 4K 高码率吞吐
             if (path.contains("thread=")) {
-                path = path.replaceAll("thread=\\d+", "thread=8");
-                writeDebugLog(mAppContext, "[并发优化] 锁定代理并发为 8 线程，全力保障 4K 高码率吞吐");
+                path = path.replaceAll("thread=\\d+", "thread=4");
+                writeDebugLog(mAppContext, "[并发优化] 锁定代理并发为 4 线程，全力保障 4K 高码率吞吐");
             }
         }
         writeDebugLog(mAppContext, "setDataSource: " + path);
