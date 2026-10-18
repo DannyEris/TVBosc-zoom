@@ -542,7 +542,7 @@ public class PlayFragment extends BaseLazyFragment {
             public void run() {
                 if (mVideoView == null) return;
 
-                // 核心保障 1：外层容器与控制器矩阵严格死锁 1.0f，彻底杜绝 UI 被拉伸或缩小裁切
+                // 确保容器与控制器自身不产生形变与裁剪
                 if (mVideoView.getScaleX() != 1.0f || mVideoView.getScaleY() != 1.0f) {
                     mVideoView.setScaleX(1.0f);
                     mVideoView.setScaleY(1.0f);
@@ -583,11 +583,11 @@ public class PlayFragment extends BaseLazyFragment {
                     return;
                 }
 
-                // 1.0x 重置状态：清除芯片硬件裁切，复位视口与渲染视图
+                // 1.0x 重置状态：清除芯片硬件裁切，复位视口与矩阵
                 if (Math.abs(zoom - 1.0f) < 0.01f) {
                     int originalScale = mVodPlayerCfg != null ? mVodPlayerCfg.optInt("sc", 0) : xyz.doikki.videoplayer.player.VideoView.SCREEN_SCALE_DEFAULT;
                     if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
-                        ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(1.0f);
+                        ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(1.0f, false);
                     }
                     renderView.setScaleX(1.0f);
                     renderView.setScaleY(1.0f);
@@ -605,7 +605,6 @@ public class PlayFragment extends BaseLazyFragment {
                 int cropRight = 0;
 
                 if (videoRatio > containerRatio) {
-                    // 宽荧幕：根据 zoom 算出目标展示高度，以此反推芯片两侧裁切量
                     int baseHeight = Math.round(containerWidth / videoRatio);
                     int targetHeight = Math.min((int) Math.round(baseHeight * zoom), containerHeight);
                     float displayedRatio = (float) containerWidth / (float) targetHeight;
@@ -616,7 +615,6 @@ public class PlayFragment extends BaseLazyFragment {
                     cropLeft = totalCropX / 2;
                     cropRight = totalCropX - cropLeft;
                 } else {
-                    // 窄幅片源
                     int baseWidth = Math.round(containerHeight * videoRatio);
                     int targetWidth = Math.min((int) Math.round(baseWidth * zoom), containerWidth);
                     float displayedRatio = (float) targetWidth / (float) containerHeight;
@@ -628,27 +626,27 @@ public class PlayFragment extends BaseLazyFragment {
                     cropBottom = totalCropY - cropTop;
                 }
 
+                boolean isHardwareCropSupported = com.github.tvbox.osc.util.AmlogicCropHelper.isSupported();
+
                 if (renderView instanceof com.github.tvbox.osc.player.render.SurfaceRenderView) {
-                    // 核心保障 2：还原 827f78a 验证通过的基准逻辑
-                    // 1. SurfaceView 矩阵死锁 1.0f，绝不产生负坐标，彻底消灭向左上角/右下角漂移
                     renderView.setScaleX(1.0f);
                     renderView.setScaleY(1.0f);
 
-                    // 2. 纯走 MeasureHelper 视口度量高度扩展（在 Gravity.CENTER 约束下严格沿正中心上下对称展开）
-                    ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(zoom);
+                    // 传递缩放比例以及是否支持硬件裁切模式
+                    ((com.github.tvbox.osc.player.render.SurfaceRenderView) renderView).setVideoZoom(zoom, isHardwareCropSupported);
 
-                    // 3. Tx9 Pro 等可写设备无感直通硬件裁切；M19 等设备走 AliOS 原生视口裁切
-                    if (com.github.tvbox.osc.util.AmlogicCropHelper.isSupported()) {
+                    if (isHardwareCropSupported) {
+                        // Tx9 Pro: 芯片底层硬件裁切
                         com.github.tvbox.osc.util.AmlogicCropHelper.setCrop(cropTop, cropLeft, cropBottom, cropRight);
                     } else {
+                        // 天猫魔盒 M19 / 小米电视 4A: 不支持底层硬件裁切节点
                         if (!hasShownUnsupportedZoomToast) {
                             hasShownUnsupportedZoomToast = true;
-                            // 仅针对在特定封闭电视（如小米）上可能产生拉伸的情况给出温和提示
                             Toast.makeText(mContext, "若画面拉伸变形，请在设置中切换为TextureView模式", Toast.LENGTH_SHORT).show();
                         }
                     }
                 } else {
-                    // TextureView 模式：走标准 GPU View 矩阵等比缩放
+                    // TextureView 模式 (走标准 GPU View 矩阵等比缩放)
                     renderView.setScaleX(zoom);
                     renderView.setScaleY(zoom);
                 }
