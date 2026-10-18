@@ -3,7 +3,12 @@ package com.github.tvbox.osc.util;
 import java.io.File;
 import java.io.FileOutputStream;
 
-private static volatile boolean sHasOptimized = false;
+public class AmlogicCropHelper {
+    private static final String CROP_PATH = "/sys/class/video/crop";
+    private static Boolean sIsSupported = null;
+    private static int sWriteMode = 0;
+    private static volatile String sLastCropCmd = "";
+    private static volatile boolean sHasOptimized = false;
 
     /**
      * 针对 Amlogic 高刷4K片源的底层总线与功耗优化 (仅在 Root 环境执行一次)
@@ -16,7 +21,7 @@ private static volatile boolean sHasOptimized = false;
             @Override
             public void run() {
                 try {
-                    // 拼接优化指令：旁路去隔行、关闭重负荷滤镜、开启音画同步保护、限制 CPU 虚高发热
+                    // 拼接优化指令：旁路去隔行(DI)、关闭重负荷滤镜、开启音画同步保护、限制 CPU 虚高发热
                     String[] cmds = new String[]{
                         "echo 1 > /sys/module/di/parameters/bypass_all",
                         "echo 0 > /sys/class/amvecm/dnlp",
@@ -41,12 +46,6 @@ private static volatile boolean sHasOptimized = false;
             }
         }).start();
     }
-
-public class AmlogicCropHelper {
-    private static final String CROP_PATH = "/sys/class/video/crop";
-    private static Boolean sIsSupported = null;
-    private static int sWriteMode = 0;
-    private static volatile String sLastCropCmd = "";
 
     public static boolean isSupported() {
         if (sIsSupported == null) {
@@ -101,13 +100,14 @@ public class AmlogicCropHelper {
     public static void setCrop(int top, int left, int bottom, int right) {
         if (!isSupported()) return;
 
+        // 偶数对齐
         top = (top / 2) * 2;
         left = (left / 2) * 2;
         bottom = (bottom / 2) * 2;
         right = (right / 2) * 2;
 
         final String cmd = top + " " + left + " " + bottom + " " + right;
-        if (cmd.equals(sLastCropCmd)) return; // 指令未变直接拦截，防止高频读写触发 VPP 死锁
+        if (cmd.equals(sLastCropCmd)) return; // 指令未变直接拦截，防止高频刷写触发 VPP 死锁
         sLastCropCmd = cmd;
 
         new Thread(new Runnable() {
