@@ -10,6 +10,7 @@ public class MeasureHelper {
     private int mCurrentScreenScale;
     private int mVideoRotationDegree;
     private float mVideoZoom = 1.0f;
+    private boolean mHardwareCropMode = false;
 
     public void setVideoRotation(int videoRotationDegree) {
         mVideoRotationDegree = videoRotationDegree;
@@ -26,6 +27,10 @@ public class MeasureHelper {
 
     public void setVideoZoom(float zoom) {
         mVideoZoom = zoom;
+    }
+
+    public void setHardwareCropMode(boolean hardwareCropMode) {
+        mHardwareCropMode = hardwareCropMode;
     }
 
     public int[] doMeasure(int widthMeasureSpec, int heightMeasureSpec) {
@@ -51,16 +56,25 @@ public class MeasureHelper {
                     height = width * mVideoHeight / mVideoWidth;
                 }
 
-                // 核心：若处于放大状态，允许根据 zoom 扩展视口，消除黑边死锁
-                if (mVideoZoom > 1.0f) {
-                    float videoRatio = (float) mVideoWidth / (float) mVideoHeight;
-                    float containerRatio = (float) View.MeasureSpec.getSize(widthMeasureSpec) / (float) View.MeasureSpec.getSize(heightMeasureSpec);
-                    if (videoRatio > containerRatio) {
-                        int maxH = View.MeasureSpec.getSize(heightMeasureSpec);
-                        height = Math.min((int) Math.round(height * mVideoZoom), maxH);
+                // 核心修复：支持双向缩放，并区分硬件芯片裁切与视口外扩
+                if (mVideoZoom > 0 && Math.abs(mVideoZoom - 1.0f) > 0.01f) {
+                    if (mHardwareCropMode) {
+                        // 通路 1（Tx9 Pro 等具备芯片寄存器控制权的设备）：
+                        // 视口单向拓展填满黑边，由 VPP 硬件寄存器执行裁切
+                        float videoRatio = (float) mVideoWidth / (float) mVideoHeight;
+                        float containerRatio = (float) View.MeasureSpec.getSize(widthMeasureSpec) / (float) View.MeasureSpec.getSize(heightMeasureSpec);
+                        if (videoRatio > containerRatio) {
+                            int maxH = View.MeasureSpec.getSize(heightMeasureSpec);
+                            height = Math.min((int) Math.round(height * mVideoZoom), maxH);
+                        } else {
+                            int maxW = View.MeasureSpec.getSize(widthMeasureSpec);
+                            width = Math.min((int) Math.round(width * mVideoZoom), maxW);
+                        }
                     } else {
-                        int maxW = View.MeasureSpec.getSize(widthMeasureSpec);
-                        width = Math.min((int) Math.round(width * mVideoZoom), maxW);
+                        // 通路 2（天猫魔盒 M19 等无 Root 节点设备，完美还原 827f78a 机制）：
+                        // 宽高严格同步以 zoom 缩放，保持原本 2.39:1 等比，支持放大与缩小
+                        width = Math.round(width * mVideoZoom);
+                        height = Math.round(height * mVideoZoom);
                     }
                 }
                 break;
