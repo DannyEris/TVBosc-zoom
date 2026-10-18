@@ -70,7 +70,12 @@ public class SurfaceRenderView extends SurfaceView implements IRenderView, Surfa
      * 传递缩放倍率给底层度量器
      */
     public void setVideoZoom(float zoom) {
+        setVideoZoom(zoom, false);
+    }
+
+    public void setVideoZoom(float zoom, boolean hardwareCropMode) {
         if (mMeasureHelper != null) {
+            mMeasureHelper.setHardwareCropMode(hardwareCropMode);
             mMeasureHelper.setVideoZoom(zoom);
             requestLayout();
         }
