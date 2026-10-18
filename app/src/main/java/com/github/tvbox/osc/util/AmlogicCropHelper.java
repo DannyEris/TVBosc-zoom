@@ -6,7 +6,7 @@ import java.io.FileOutputStream;
 public class AmlogicCropHelper {
     private static final String CROP_PATH = "/sys/class/video/crop";
     private static Boolean sIsSupported = null;
-    private static int sWriteMode = 0; // 1: FileOutputStream 直写, 2: su 管道
+    private static int sWriteMode = 0;
     private static volatile String sLastCropCmd = "";
 
     public static boolean isSupported() {
@@ -57,20 +57,18 @@ public class AmlogicCropHelper {
     }
 
     /**
-     * 写入硬件裁剪参数 (top left bottom right)
-     * 强制做 2 像素偶数对齐，防止 YUV420 色度抽样寻址错位导致声画不同步
+     * 写入硬件裁剪参数 (强制进行 2 像素偶数对齐，杜绝 DMA 色度抽样寻址卡顿)
      */
     public static void setCrop(int top, int left, int bottom, int right) {
         if (!isSupported()) return;
 
-        // 偶数对齐
         top = (top / 2) * 2;
         left = (left / 2) * 2;
         bottom = (bottom / 2) * 2;
         right = (right / 2) * 2;
 
         final String cmd = top + " " + left + " " + bottom + " " + right;
-        if (cmd.equals(sLastCropCmd)) return; // 避免重复向底层节点高频刷入相同指令
+        if (cmd.equals(sLastCropCmd)) return; // 指令未变直接拦截，防止高频读写触发 VPP 死锁
         sLastCropCmd = cmd;
 
         new Thread(new Runnable() {
