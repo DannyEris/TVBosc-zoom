@@ -603,7 +603,7 @@ public class PlayFragment extends BaseLazyFragment {
                 int cropLeft = 0;
                 int cropRight = 0;
 
-                // 核心修复：缩小模式 (zoom < 1.0f) 下硬件裁剪参数恒定归零，由 MeasureHelper 等比缩小
+                // 核心修复：缩小模式 (zoom < 1.0f) 下必须将硬件裁剪参数清零，防止双重挤压变形
                 if (zoom > 1.0f) {
                     if (videoRatio > containerRatio) {
                         int baseHeight = Math.round(containerWidth / videoRatio);
@@ -613,7 +613,8 @@ public class PlayFragment extends BaseLazyFragment {
                         if (activeVideoWidth > videoWidth) activeVideoWidth = videoWidth;
 
                         int totalCropX = videoWidth - activeVideoWidth;
-                        cropLeft = (totalCropX / 4) * 2; // 偶数对齐
+                        // 强制 2 像素偶数对齐，杜绝 YUV420 UV 色度平面未对齐导致的卡顿与音画脱节
+                        cropLeft = (totalCropX / 4) * 2;
                         cropRight = cropLeft;
                     } else {
                         int baseWidth = Math.round(containerHeight * videoRatio);
@@ -623,10 +624,18 @@ public class PlayFragment extends BaseLazyFragment {
                         if (activeVideoHeight > videoHeight) activeVideoHeight = videoHeight;
 
                         int totalCropY = videoHeight - activeVideoHeight;
-                        cropTop = (totalCropY / 4) * 2; // 偶数对齐
+                        // 强制 2 像素偶数对齐
+                        cropTop = (totalCropY / 4) * 2;
                         cropBottom = cropTop;
                     }
+                } else {
+                    // 缩小时硬件裁剪参数清零，完全交由 MeasureHelper 执行物理缩小
+                    cropTop = 0;
+                    cropBottom = 0;
+                    cropLeft = 0;
+                    cropRight = 0;
                 }
+                
 
                 boolean isHardwareCropSupported = com.github.tvbox.osc.util.AmlogicCropHelper.isSupported();
 
