@@ -541,7 +541,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
                     // 关键核心：在排队送入芯片硬件解码器前，将 NAL 35 (AUD) 瞬间剥离
                     @Override
-                    protected void onQueueInputBuffer(DecoderInputBuffer buffer) throws PlaybackException {
+                    protected void onQueueInputBuffer(DecoderInputBuffer buffer) {
                         super.onQueueInputBuffer(buffer);
                         if (mIsHevcStream && buffer != null && buffer.data != null) {
                             stripH265AudNal(buffer.data);
