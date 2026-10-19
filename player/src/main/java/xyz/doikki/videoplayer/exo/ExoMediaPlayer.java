@@ -1,6 +1,7 @@
 package xyz.doikki.videoplayer.exo;
 
 import android.annotation.SuppressLint;
+import android.app.ActivityManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -54,7 +55,9 @@ import com.google.android.exoplayer2.video.MediaCodecVideoRenderer;
 import com.google.android.exoplayer2.video.VideoRendererEventListener;
 import com.google.android.exoplayer2.video.VideoSize;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileReader;
 import java.io.FileWriter;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
@@ -101,9 +104,8 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     private BroadcastReceiver mModeToggleReceiver;
     private static File sDebugLogFile = null;
 
-    // 活跃出帧监控心跳
+    // 活跃出帧监控与音画联动检测变量
     private volatile long mLastRenderedFrameTimeRealtime = 0;
-    // 实时物理出帧统计 (FPS)
     private volatile int mRenderedFrameCount = 0;
     private int mLastFpsFrameCount = 0;
     private long mLastFpsCalcTime = 0;
@@ -111,6 +113,14 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     private int mStallRescueStep = 0;
     private Handler mWatchdogHandler;
     private Runnable mWatchdogRunnable;
+
+    // 音画联动监测锚点
+    private long mLastTrackedPosition = -1;
+    private long mLastPositionAdvanceTime = 0;
+
+    // 设备画像缓存 (静态一次性探测)
+    private static int sTotalRamMb = -1;
+    private static int sTotalCmaKb = -1;
 
     public static boolean isMultiChannelModeEnabled(Context context) {
         SharedPreferences sp = context.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
@@ -134,7 +144,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 }
             }
 
-            // 文件尺寸达标清空机制：超过 2MB 时清空重置
             boolean append = true;
             if (sDebugLogFile.exists() && sDebugLogFile.length() > MAX_LOG_FILE_SIZE) {
                 append = false;
@@ -167,9 +176,87 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     public ExoMediaPlayer(Context context) {
         mAppContext = context.getApplicationContext();
         mMediaSourceHelper = ExoMediaSourceHelper.getInstance(context);
+        detectDeviceProfile(mAppContext);
         registerModeReceiver();
         initWatchdog();
     }
+
+    // ==================== 1. 设备环境与硬件画像自适应探测 ====================
+
+    private static synchronized void detectDeviceProfile(Context context) {
+        if (sTotalRamMb > 0) return;
+
+        // 探测系统物理总 RAM
+        try {
+            ActivityManager am = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
+            if (am != null) {
+                ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+                am.getMemoryInfo(mi);
+                sTotalRamMb = (int) (mi.totalMem / (1024 * 1024));
+            }
+        } catch (Throwable ignored) {
+        }
+        if (sTotalRamMb <= 0) sTotalRamMb = 2048; // 保守兜底 2GB
+
+        // 探测 Linux 底层真实 TotalCMA 大小 (/proc/meminfo)，兼容晶晨 TotalCMA 与标准 CmaTotal
+        File meminfo = new File("/proc/meminfo");
+        if (meminfo.exists() && meminfo.canRead()) {
+            try (BufferedReader br = new BufferedReader(new FileReader(meminfo))) {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    String lower = line.toLowerCase(Locale.US);
+                    if (lower.contains("cma") && lower.contains("total")) {
+                        String[] parts = line.trim().split("\\s+");
+                        if (parts.length >= 2) {
+                            sTotalCmaKb = Integer.parseInt(parts[1]);
+                            break;
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        writeDebugLog(context, "[硬件画像] 探测就绪: 物理运存 = " + sTotalRamMb + " MB, CMA总量 = " 
+                + (sTotalCmaKb > 0 ? (sTotalCmaKb / 1024 + " MB") : "未开放读取(按运存策略自适应)"));
+    }
+
+    private static boolean isConstrainedMemoryDevice() {
+        // CMA <= 200MB (例如天猫 M19 为 172MB) 或 物理运存 <= 2GB 判定为显存受限机型
+        if (sTotalCmaKb > 0 && sTotalCmaKb <= 200 * 1024) {
+            return true;
+        }
+        return sTotalRamMb <= 2048;
+    }
+
+    private static long calculateFrameDurationUs(Format format) {
+        if (format != null && format.frameRate > 0) {
+            return (long) (1_000_000.0f / format.frameRate);
+        }
+        return 16_666L; // 缺失帧率时默认按 60fps (16.6ms) 极限场景计算
+    }
+
+    private static int calculateDynamicMaxInputSize(Format format, boolean isConstrainedDevice) {
+        int width = (format != null && format.width != Format.NO_VALUE) ? format.width : 1920;
+        int height = (format != null && format.height != Format.NO_VALUE) ? format.height : 1080;
+
+        int baseSize;
+        if (width >= 3840 || height >= 2160) {
+            // 4K 场景：受限设备基准设为 2MB，防止 MediaCodec 多队列过度索取物理页；高配机 4MB
+            baseSize = isConstrainedDevice ? (2 * 1024 * 1024) : (4 * 1024 * 1024);
+        } else {
+            // 1080P 及以下：1MB 完全足够
+            baseSize = 1024 * 1024;
+        }
+
+        // 终极保护：若容器头已明确声明了更大的单包尺寸（超大 I 帧），取最大值，杜绝 BufferOverflow 闪退
+        if (format != null && format.maxInputSize != Format.NO_VALUE && format.maxInputSize > 0) {
+            return Math.max(baseSize, format.maxInputSize);
+        }
+        return baseSize;
+    }
+
+    // ==================== 2. 模式切换与音画解耦自愈哨兵 ====================
 
     private void registerModeReceiver() {
         if (mModeToggleReceiver != null) {
@@ -206,45 +293,71 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
     }
 
-    // 优化的无感避障看门狗哨兵
     private void initWatchdog() {
         mWatchdogHandler = new Handler(Looper.getMainLooper());
         mWatchdogRunnable = new Runnable() {
             @Override
             public void run() {
-                if (mInternalPlayer != null && isPlaying()) {
+                if (mInternalPlayer != null && mInternalPlayer.getPlayWhenReady()) {
+                    int playbackState = mInternalPlayer.getPlaybackState();
                     long now = SystemClock.elapsedRealtime();
-                    // 门槛 1200ms：快速捕捉底层卡顿
-                    if (mLastRenderedFrameTimeRealtime > 0 
-                            && (now - mLastRenderedFrameTimeRealtime > 1200) 
-                            && getCurrentPosition() > 3000) {
-                        
-                        long currentPos = getCurrentPosition();
-                        long duration = getDuration();
 
-                        if (mStallRescueStep == 0) {
-                            // 第一顺位：尝试原地 Flush 解锁显存拥塞
-                            writeDebugLog(mAppContext, "[自愈哨兵] 检测到视频硬件停滞，执行温和【原地 Flush】自愈！");
-                            mStallRescueStep = 1;
-                            // 将二次判定等待压缩至 600ms（若 600ms 内芯片未能恢复出帧，立即执行快进脱困）
-                            mLastRenderedFrameTimeRealtime = now - 600;
-                            mInternalPlayer.seekTo(currentPos);
-                        } else {
-                            // 第二顺位：维持 3.5 秒固定步长，彻底跨过当前损坏的 GOP 坏块区
-                            long targetPos = (duration > 0) ? Math.min(currentPos + 3500, duration) : currentPos + 3500;
-                            writeDebugLog(mAppContext, "[自愈哨兵] 原地 Flush 后仍受阻(损坏帧)，执行【跨 GOP 快进 3.5 秒】彻底跨过坏块！目标点: " + targetPos);
+                    // 1. 网络缓冲阶段 (STATE_BUFFERING)：哨兵静默，绝不在正常等网速时执行 seek 打断拉流
+                    if (playbackState == Player.STATE_BUFFERING) {
+                        mLastRenderedFrameTimeRealtime = now;
+                        mLastPositionAdvanceTime = now;
+                    } 
+                    // 2. 仅在就绪出帧状态 (STATE_READY) 下检测真正的管线死锁与音画脱节
+                    else if (playbackState == Player.STATE_READY) {
+                        long currentPos = getCurrentPosition();
+
+                        // 跟踪音频时钟与播放位移
+                        if (currentPos != mLastTrackedPosition) {
+                            mLastTrackedPosition = currentPos;
+                            mLastPositionAdvanceTime = now;
+                        }
+
+                        // 音频在前进（1.5 秒内有位移）
+                        boolean isAudioProgressing = (now - mLastPositionAdvanceTime) < 1500;
+                        long videoStallDuration = (mLastRenderedFrameTimeRealtime > 0) ? (now - mLastRenderedFrameTimeRealtime) : 0;
+
+                        // 场景 A：【画面定格，但声音正常播放】（超 2.8 秒无新帧，晶晨 VPU 硬件管线死锁）
+                        if (isAudioProgressing && videoStallDuration > 2800 && currentPos > 3000) {
+                            long duration = getDuration();
+                            if (mStallRescueStep == 0) {
+                                writeDebugLog(mAppContext, "[自愈哨兵] 捕获到【画面定格声音正常】，执行原地 Flush 救活硬件管线！");
+                                mStallRescueStep = 1;
+                                mLastRenderedFrameTimeRealtime = now + 1500;
+                                mLastPositionAdvanceTime = now + 1500;
+                                mInternalPlayer.seekTo(currentPos);
+                            } else {
+                                long targetPos = (duration > 0) ? Math.min(currentPos + 3000, duration) : currentPos + 3000;
+                                writeDebugLog(mAppContext, "[自愈哨兵] 原地 Flush 未脱困，跨越故障 GOP。目标: " + targetPos);
+                                mStallRescueStep = 0;
+                                mLastRenderedFrameTimeRealtime = now + 2500;
+                                mLastPositionAdvanceTime = now + 2500;
+                                mInternalPlayer.seekTo(targetPos);
+                            }
+                        }
+                        // 场景 B：【音画双双停顿】（放宽门槛至 6 秒，避开网盘暂时性网络抖动，防误杀）
+                        else if (!isAudioProgressing && videoStallDuration > 6000 && currentPos > 3000) {
+                            long duration = getDuration();
+                            writeDebugLog(mAppContext, "[自愈哨兵] 音画双停超 6 秒，执行极端挂起脱困，目标点: " + currentPos);
                             mStallRescueStep = 0;
-                            mLastRenderedFrameTimeRealtime = now + 2500; // 跨过坏帧后给予 2.5 秒正常缓冲恢复期
-                            mInternalPlayer.seekTo(targetPos);
+                            mLastRenderedFrameTimeRealtime = now + 2500;
+                            mLastPositionAdvanceTime = now + 2500;
+                            mInternalPlayer.seekTo(currentPos);
                         }
                     }
                 }
                 if (mWatchdogHandler != null) {
-                    mWatchdogHandler.postDelayed(this, 300); // 300ms 高频巡检
+                    mWatchdogHandler.postDelayed(this, 500); // 500ms 轻量巡检
                 }
             }
         };
     }
+
+    // ==================== 3. 播放器初始化与核心自适应装配 ====================
 
     @Override
     public void initPlayer() {
@@ -255,13 +368,40 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         writeDebugLog(mAppContext, "[initPlayer] 当前音频输出模式: " + (multiChannel ? "【功放模式 5.1 直通】" : "【电视模式 2.0 下混】"));
 
         mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
+        mLastPositionAdvanceTime = SystemClock.elapsedRealtime();
+        mLastTrackedPosition = -1;
         mStallRescueStep = 0;
 
-        // 4K 60fps 专属大水池配置：大幅提高后台预读水位，彻底消除断续卡顿感
+        // ---------- 1. 网络水库 LoadControl 自适应构建 ----------
+        boolean constrained = isConstrainedMemoryDevice();
+        int minBufferMs;
+        int maxBufferMs;
+        int targetBufferBytes;
+        boolean prioritizeTime;
+
+        if (constrained) {
+            // 受限设备（天猫 M19 等 2GB RAM / 170M CMA）：容量封顶，杜绝内存爆仓
+            minBufferMs = 8_000;        // 最小水线 8 秒
+            maxBufferMs = 18_000;       // 最大预读 18 秒
+            targetBufferBytes = 36 * 1024 * 1024; // 36MB（可容纳 50Mbps 码率约 6 秒，防抖且不吃满系统 RAM）
+            prioritizeTime = false;     // 容量优先！防止极端码流无休止吞噬 Java 堆内存
+        } else {
+            // 高配电视/盒子（3G/4G RAM）：宽裕模式
+            minBufferMs = 15_000;
+            maxBufferMs = 50_000;
+            targetBufferBytes = 64 * 1024 * 1024;
+            prioritizeTime = true;
+        }
+
         mLoadControl = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(20_000, 60_000, 2_500, 10_000)
-                .setTargetBufferBytes(96 * 1024 * 1024) // 显存缓冲扩容至 96MB
-                .setPrioritizeTimeOverSizeThresholds(true)
+                .setBufferDurationsMs(
+                        minBufferMs, 
+                        maxBufferMs, 
+                        1_200, // 极速起播：1.2 秒蓄水立即亮屏
+                        2_000  // 极速恢复：网络抖动后只需 2 秒数据即复播，绝不死等
+                )
+                .setTargetBufferBytes(targetBufferBytes)
+                .setPrioritizeTimeOverSizeThresholds(prioritizeTime)
                 .setBackBuffer(0, false)
                 .build();
 
@@ -278,7 +418,8 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             mTrackSelector = defaultTrackSelector;
         }
 
-        mRenderersFactory = createCustomRenderersFactory(multiChannel);
+        // ---------- 2. 视频渲染器工厂自适应装配 ----------
+        mRenderersFactory = createCustomRenderersFactory(multiChannel, constrained);
 
         mInternalPlayer = new SimpleExoPlayer.Builder(
                 mAppContext,
@@ -305,7 +446,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
     }
 
-    private RenderersFactory createCustomRenderersFactory(final boolean enableMultiChannel) {
+    private RenderersFactory createCustomRenderersFactory(final boolean enableMultiChannel, final boolean isConstrainedDevice) {
         return new DefaultRenderersFactory(mAppContext) {
             @Override
             protected void buildVideoRenderers(
@@ -318,7 +459,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     long allowedVideoJoiningTimeMs,
                     ArrayList<Renderer> out) {
 
-                writeDebugLog(context, "[buildVideoRenderers] 挂载稳态渲染器与心跳监控...");
+                writeDebugLog(context, "[buildVideoRenderers] 挂载高精度自适应视频渲染器...");
 
                 MediaCodecVideoRenderer videoRenderer = new MediaCodecVideoRenderer(
                         context,
@@ -329,6 +470,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         eventListener,
                         50) {
 
+                    // 动态单帧周期，初始按 60fps (16.6ms) 兜底
+                    private long mDynamicFrameDurationUs = 16_666L;
+
                     @Override
                     @SuppressLint("InlinedApi")
                     protected MediaFormat getMediaFormat(
@@ -338,31 +482,36 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             float codecOperatingRate,
                             boolean deviceNeedsNoPostProcessWorkaround,
                             int tunnelingAudioSessionId) {
+                        
                         MediaFormat mediaFormat = super.getMediaFormat(
                                 format, codecMimeType, codecMaxValues, codecOperatingRate,
                                 deviceNeedsNoPostProcessWorkaround, tunnelingAudioSessionId);
 
-                        // 扩大输入缓冲至 4MB，确保 4K 码流中的大 I 帧完整喂入
-                        mediaFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4 * 1024 * 1024);
+                        // 动态更新帧率周期，规避重写 onInputFormatChanged 的跨版本兼容问题
+                        mDynamicFrameDurationUs = calculateFrameDurationUs(format);
+                        writeDebugLog(context, "[规格感知] 片源帧率: " + (format != null ? format.frameRate : 0) 
+                                + " fps, 单帧周期: " + (mDynamicFrameDurationUs / 1000f) + " ms");
+
+                        // 自适应分配单帧输入缓冲：按分辨率、受限等级及容器头动态裁切
+                        int dynamicInputSize = calculateDynamicMaxInputSize(format, isConstrainedDevice);
+                        mediaFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, dynamicInputSize);
                         return mediaFormat;
                     }
 
-                    // 严禁丢弃未解码帧，守护参考帧队列完整性
+                    // 恢复父类原生追赶丢帧：当视频落后音频严重时跳过非参考帧追赶 I 帧，消除定格诱因
                     @Override
                     protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        return false;
+                        return super.shouldDropBuffersToKeyframe(earlyUs, elapsedRealtimeUs, isLastBuffer);
                     }
 
-                    // 核心观感优化：精准过滤 Seek 产生的历史倒带帧，彻底根除画面倒退回放！
+                    // 动态帧率感知丢弃：以片源“帧周期”为基准，快速归还 CMA 槽位
                     @Override
                     protected boolean shouldDropOutputBuffer(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 当帧落后超过 100ms（Seek 产生的历史帧落后常达 1~3 秒），果断丢弃不渲染！
-                        // 解码器依然会在后台解码以保持参考帧完整，但电视画面绝不倒退显示！
-                        if (earlyUs < -100_000) {
-                            return true;
-                        }
-                        // 100ms 以内的轻微抖动不丢弃，全力保障 60fps 满血丝滑度
-                        return false;
+                        // 阈值：当渲染落后超过 2.2 个帧周期时丢弃
+                        // 60fps (16.6ms) -> 落后超 ~36ms 立即 drop 归还 Buffer，杜绝 170M CMA 耗尽；
+                        // 24fps (41.6ms) -> 放宽至 ~91ms，确保电影级平滑度
+                        long dynamicDropThreshold = -(long) (mDynamicFrameDurationUs * 2.2f);
+                        return earlyUs < dynamicDropThreshold;
                     }
 
                     @Override
@@ -373,7 +522,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             long releaseTimeNs) {
                         mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
                         mRenderedFrameCount++;
-                        mStallRescueStep = 0; // 只要有连续帧送出，立即归零重置救急步进
+                        mStallRescueStep = 0; // 只要有连续帧送显，立即清零自愈步进
                         super.renderOutputBufferV21(codec, index, presentationTimeUs, releaseTimeNs);
                     }
 
@@ -383,7 +532,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             int index,
                             long presentationTimeUs) {
                         mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
-                        mRenderedFrameCount++; // 补上此行，确保全通道出帧率统计不归零
+                        mRenderedFrameCount++;
                         mStallRescueStep = 0;
                         super.renderOutputBuffer(codec, index, presentationTimeUs);
                     }
@@ -405,14 +554,12 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
                 writeDebugLog(context, "[buildAudioRenderers] 锁定 FFmpeg 第一顺位软解...");
 
-                boolean ffmpegAdded = false;
                 try {
                     Class<?> clazz = Class.forName("com.google.android.exoplayer2.ext.ffmpeg.FfmpegAudioRenderer");
                     Constructor<?> constructor = clazz.getConstructor(
                             Handler.class, AudioRendererEventListener.class, AudioSink.class);
                     Renderer ffmpegRenderer = (Renderer) constructor.newInstance(eventHandler, eventListener, audioSink);
                     out.add(ffmpegRenderer);
-                    ffmpegAdded = true;
                     writeDebugLog(context, "[buildAudioRenderers] FFmpegAudioRenderer 挂载成功！");
                 } catch (Throwable e) {
                     writeDebugLog(context, "[buildAudioRenderers] FFmpegAudioRenderer 异常: " + e.getMessage());
@@ -484,10 +631,10 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
         if (path != null) {
-            // 锁定代理并发为 4 线程，全力保障 4K 高码率吞吐
+            // 自适应并发优化：将 8 线程替换为温和高效的 3 线程，防范网盘服务端限速与连接重置
             if (path.contains("thread=")) {
-                path = path.replaceAll("thread=\\d+", "thread=4");
-                writeDebugLog(mAppContext, "[并发优化] 锁定代理并发为 4 线程，全力保障 4K 高码率吞吐");
+                path = path.replaceAll("thread=\\d+", "thread=3");
+                writeDebugLog(mAppContext, "[并发优化] 动态调整代理并发为 3 线程，保障连接稳态防限速");
             }
         }
         writeDebugLog(mAppContext, "setDataSource: " + path);
@@ -527,6 +674,10 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
         mIsPreparing = true;
         mStallRescueStep = 0;
+        mLastTrackedPosition = -1;
+        long now = SystemClock.elapsedRealtime();
+        mLastPositionAdvanceTime = now;
+        mLastRenderedFrameTimeRealtime = now;
         mInternalPlayer.setMediaSource(mMediaSource, getStartPosition());
         markStartPositionApplied();
         mInternalPlayer.prepare();
@@ -540,6 +691,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             mIsPreparing = false;
             mRetriedAsHls = false;
             mStallRescueStep = 0;
+            mLastTrackedPosition = -1;
+            mLastPositionAdvanceTime = 0;
+            mLastRenderedFrameTimeRealtime = 0;
         }
     }
 
@@ -558,8 +712,11 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     @Override
     public void seekTo(long time) {
         if (mInternalPlayer == null) return;
-        // 用户主动 Seek 赋予 2.5 秒正常蓄水保护
-        mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime() + 2500;
+        // 用户主动 Seek 时赋予 2.5 秒正常蓄水保护期，并重置比对锚点
+        long now = SystemClock.elapsedRealtime();
+        mLastRenderedFrameTimeRealtime = now + 2500;
+        mLastPositionAdvanceTime = now + 2500;
+        mLastTrackedPosition = -1;
         mInternalPlayer.seekTo(time);
     }
 
@@ -662,7 +819,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
         switch (playbackState) {
             case Player.STATE_BUFFERING:
-                // 保留中央贪食蛇/加载菊花圈
                 mPlayerEventListener.onInfo(MEDIA_INFO_BUFFERING_START, getBufferedPercentage());
                 break;
             case Player.STATE_READY:
@@ -822,7 +978,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             buffer.flip();
         }
     }
-    // 获取当前播放视频的 Format 格式对象
+
     public Format getVideoFormat() {
         if (mInternalPlayer != null) {
             return mInternalPlayer.getVideoFormat();
@@ -830,22 +986,19 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         return null;
     }
 
-    // 获取当前真实物理渲染帧率 (FPS)
     public float getRealFps() {
         if (mInternalPlayer == null || !isPlaying()) {
             return 0f;
         }
-        // 1. 如果片源流头标注了静态帧率且大于0，优先参考
         Format format = mInternalPlayer.getVideoFormat();
         if (format != null && format.frameRate > 0) {
             return format.frameRate;
         }
 
-        // 2. 依据硬件实际送显出帧频率进行测算
         long now = SystemClock.elapsedRealtime();
         if (mLastFpsCalcTime > 0) {
             long duration = now - mLastFpsCalcTime;
-            if (duration >= 800) { // 约每秒计算一次
+            if (duration >= 800) {
                 int frames = mRenderedFrameCount - mLastFpsFrameCount;
                 if (frames > 0) {
                     mCurrentRealFps = (frames * 1000f) / duration;
@@ -859,7 +1012,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         }
         return mCurrentRealFps;
     }
-    // 动态调整 ExoPlayer 底层解码器硬件裁切模式
+
     public void setVideoScalingMode(int videoScalingMode) {
         if (mInternalPlayer != null) {
             mInternalPlayer.setVideoScalingMode(videoScalingMode);
