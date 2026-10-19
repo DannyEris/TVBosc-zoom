@@ -23,6 +23,7 @@ import androidx.annotation.Nullable;
 import com.google.android.exoplayer2.C;
 import com.google.android.exoplayer2.DefaultLoadControl;
 import com.google.android.exoplayer2.DefaultRenderersFactory;
+import com.google.android.exoplayer2.ExoPlaybackException;
 import com.google.android.exoplayer2.Format;
 import com.google.android.exoplayer2.LoadControl;
 import com.google.android.exoplayer2.PlaybackException;
@@ -263,61 +264,64 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
      * 彻底根除晶晨 S912 旧微码遇 NAL 35 硬件溢出崩溃（H265 dec err local reset）的致命缺陷
      */
     private static void stripH265AudNal(ByteBuffer data) {
-        if (data == null || data.remaining() < 6) {
-            return;
-        }
-
-        int pos = data.position();
-        int limit = data.limit();
-
-        // 识别前导起始码 (00 00 01 或 00 00 00 01)
-        int startCodeLen = 0;
-        if (limit - pos >= 4 && data.get(pos) == 0 && data.get(pos + 1) == 0) {
-            if (data.get(pos + 2) == 1) {
-                startCodeLen = 3;
-            } else if (data.get(pos + 2) == 0 && data.get(pos + 3) == 1) {
-                startCodeLen = 4;
+        try {
+            if (data == null || data.remaining() < 6) {
+                return;
             }
-        }
 
-        if (startCodeLen == 0) {
-            return;
-        }
+            int pos = data.position();
+            int limit = data.limit();
 
-        int nalHeaderPos = pos + startCodeLen;
-        if (nalHeaderPos >= limit) {
-            return;
-        }
-
-        // H.265 NAL Unit Type 位于 Header 第一个字节的第 1~6 位: (byte & 0x7E) >> 1
-        byte nalByte0 = data.get(nalHeaderPos);
-        int nalType = (nalByte0 & 0x7E) >> 1;
-
-        // 命中 NAL 35 (AUD)
-        if (nalType == 35) {
-            // 搜索下一个 NALU 的起始码
-            int nextStartCodePos = -1;
-            int searchEnd = Math.min(nalHeaderPos + 32, limit - 3);
-            for (int i = nalHeaderPos + 2; i <= searchEnd; i++) {
-                if (data.get(i) == 0 && data.get(i + 1) == 0) {
-                    if (data.get(i + 2) == 1) {
-                        nextStartCodePos = i;
-                        break;
-                    } else if (i + 3 < limit && data.get(i + 2) == 0 && data.get(i + 3) == 1) {
-                        nextStartCodePos = i;
-                        break;
-                    }
+            // 识别前导起始码 (00 00 01 或 00 00 00 01)
+            int startCodeLen = 0;
+            if (limit - pos >= 4 && data.get(pos) == 0 && data.get(pos + 1) == 0) {
+                if (data.get(pos + 2) == 1) {
+                    startCodeLen = 3;
+                } else if (data.get(pos + 2) == 0 && data.get(pos + 3) == 1) {
+                    startCodeLen = 4;
                 }
             }
 
-            if (nextStartCodePos != -1) {
-                // 原生零拷贝内存前移：直接抹掉前导 AUD，使后续的实际帧（SPS/PPS/SEI/Slice）前移至索引 0
-                data.position(nextStartCodePos);
-                data.compact();
-                int newLength = data.position();
-                data.position(0);
-                data.limit(newLength);
+            if (startCodeLen == 0) {
+                return;
             }
+
+            int nalHeaderPos = pos + startCodeLen;
+            if (nalHeaderPos >= limit) {
+                return;
+            }
+
+            // H.265 NAL Unit Type 位于 Header 第一个字节的第 1~6 位: (byte & 0x7E) >> 1
+            byte nalByte0 = data.get(nalHeaderPos);
+            int nalType = (nalByte0 & 0x7E) >> 1;
+
+            // 命中 NAL 35 (AUD)
+            if (nalType == 35) {
+                // 搜索下一个 NALU 的起始码
+                int nextStartCodePos = -1;
+                int searchEnd = Math.min(nalHeaderPos + 32, limit - 3);
+                for (int i = nalHeaderPos + 2; i <= searchEnd; i++) {
+                    if (data.get(i) == 0 && data.get(i + 1) == 0) {
+                        if (data.get(i + 2) == 1) {
+                            nextStartCodePos = i;
+                            break;
+                        } else if (i + 3 < limit && data.get(i + 2) == 0 && data.get(i + 3) == 1) {
+                            nextStartCodePos = i;
+                            break;
+                        }
+                    }
+                }
+
+                if (nextStartCodePos != -1) {
+                    // 原生零拷贝内存前移：直接抹掉前导 AUD，使后续的实际帧（SPS/PPS/SEI/Slice）前移至索引 0
+                    data.position(nextStartCodePos);
+                    data.compact();
+                    int newLength = data.position();
+                    data.position(0);
+                    data.limit(newLength);
+                }
+            }
+        } catch (Throwable ignored) {
         }
     }
 
@@ -541,7 +545,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
                     // 关键核心：在排队送入芯片硬件解码器前，将 NAL 35 (AUD) 瞬间剥离
                     @Override
-                    protected void onQueueInputBuffer(DecoderInputBuffer buffer) {
+                    protected void onQueueInputBuffer(DecoderInputBuffer buffer) throws ExoPlaybackException {
                         super.onQueueInputBuffer(buffer);
                         if (mIsHevcStream && buffer != null && buffer.data != null) {
                             stripH265AudNal(buffer.data);
