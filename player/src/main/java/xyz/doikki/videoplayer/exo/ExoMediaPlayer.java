@@ -347,22 +347,40 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         return mediaFormat;
                     }
 
-                    // 严禁丢弃未解码帧，守护参考帧队列完整性
                     @Override
-                    protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        return false;
+                    @SuppressLint("InlinedApi")
+                    protected MediaFormat getMediaFormat(
+                            Format format,
+                            String codecMimeType,
+                            CodecMaxValues codecMaxValues,
+                            float codecOperatingRate,
+                            boolean deviceNeedsNoPostProcessWorkaround,
+                            int tunnelingAudioSessionId) {
+                        MediaFormat mediaFormat = super.getMediaFormat(
+                                format, codecMimeType, codecMaxValues, codecOperatingRate,
+                                deviceNeedsNoPostProcessWorkaround, tunnelingAudioSessionId);
+
+                        // 扩大输入缓冲至 4MB，容纳 4K 高码率大 I 帧
+                        mediaFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4 * 1024 * 1024);
+
+                        // 算力拉满：强制提升 4K 60fps 芯片解码频率和最高优先级，杜绝底层掉帧
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                            mediaFormat.setFloat(MediaFormat.KEY_OPERATING_RATE, 120.0f);
+                            mediaFormat.setInteger(MediaFormat.KEY_PRIORITY, 0);
+                        }
+                        return mediaFormat;
                     }
 
-                    // 核心观感优化：精准过滤 Seek 产生的历史倒带帧，彻底根除画面倒退回放！
+                    // 恢复 ExoPlayer 原生平滑追赶机制：仅在落后严重 (>500ms) 时跨 GOP 自愈，普通播放绝不卡顿
+                    @Override
+                    protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
+                        return super.shouldDropBuffersToKeyframe(earlyUs, elapsedRealtimeUs, isLastBuffer);
+                    }
+
+                    // 遵循 ExoPlayer 官方标准时钟追平策略 (-30ms)
                     @Override
                     protected boolean shouldDropOutputBuffer(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 当帧落后超过 100ms（Seek 产生的历史帧落后常达 1~3 秒），果断丢弃不渲染！
-                        // 解码器依然会在后台解码以保持参考帧完整，但电视画面绝不倒退显示！
-                        if (earlyUs < -100_000) {
-                            return true;
-                        }
-                        // 100ms 以内的轻微抖动不丢弃，全力保障 60fps 满血丝滑度
-                        return false;
+                        return super.shouldDropOutputBuffer(earlyUs, elapsedRealtimeUs, isLastBuffer);
                     }
 
                     @Override
@@ -373,7 +391,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             long releaseTimeNs) {
                         mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
                         mRenderedFrameCount++;
-                        mStallRescueStep = 0; // 只要有连续帧送出，立即归零重置救急步进
+                        mStallRescueStep = 0;
                         super.renderOutputBufferV21(codec, index, presentationTimeUs, releaseTimeNs);
                     }
 
@@ -383,7 +401,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                             int index,
                             long presentationTimeUs) {
                         mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
-                        mRenderedFrameCount++; // 补上此行，确保全通道出帧率统计不归零
+                        mRenderedFrameCount++;
                         mStallRescueStep = 0;
                         super.renderOutputBuffer(codec, index, presentationTimeUs);
                     }
@@ -403,25 +421,41 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     AudioRendererEventListener eventListener,
                     ArrayList<Renderer> out) {
 
-                writeDebugLog(context, "[buildAudioRenderers] 恢复 FFmpeg 第一顺位软解(支持 EAC3/DTS 全格式解码)...");
+                writeDebugLog(context, "[buildAudioRenderers] 构建最优智能分流音频管线(支持隧道硬件直通+特殊音轨兜底)...");
 
-                // 1. 第一顺位：FFmpeg 软解（确保 EAC3、AC3、DTS、TrueHD 全格式百分之百出声）
-                boolean ffmpegAdded = false;
+                // 核心：智能音频解码选择器
+                // 对芯片无授权的 EAC3/AC3/DTS/TrueHD 主动拦截返回空，迫使硬解器声明“不支持”，安全分流至 FFmpeg 软解！
+                MediaCodecSelector smartAudioCodecSelector = new MediaCodecSelector() {
+                    @Override
+                    public java.util.List<com.google.android.exoplayer2.mediacodec.MediaCodecInfo> getDecoderInfos(
+                            String mimeType, boolean requiresSecureDecoder, boolean requiresTunnelingDecoder)
+                            throws com.google.android.exoplayer2.mediacodec.MediaCodecUtil.DecoderQueryException {
+                        if (com.google.android.exoplayer2.util.MimeTypes.AUDIO_E_AC3.equalsIgnoreCase(mimeType)
+                                || com.google.android.exoplayer2.util.MimeTypes.AUDIO_AC3.equalsIgnoreCase(mimeType)
+                                || com.google.android.exoplayer2.util.MimeTypes.AUDIO_DTS.equalsIgnoreCase(mimeType)
+                                || com.google.android.exoplayer2.util.MimeTypes.AUDIO_DTS_HD.equalsIgnoreCase(mimeType)
+                                || com.google.android.exoplayer2.util.MimeTypes.AUDIO_TRUEHD.equalsIgnoreCase(mimeType)) {
+                            return java.util.Collections.emptyList();
+                        }
+                        return mediaCodecSelector.getDecoderInfos(mimeType, requiresSecureDecoder, requiresTunnelingDecoder);
+                    }
+                };
+
+                // 1. 第一顺位：智能硬件音频渲染器 (AAC/MP3 硬解直通，完美激活真·隧道模式 HW-Sync，声画绝对同步)
+                out.add(new MediaCodecAudioRenderer(
+                        context, smartAudioCodecSelector, enableDecoderFallback, eventHandler, eventListener, audioSink));
+
+                // 2. 第二顺位：FFmpeg 软解保底 (EAC3 6声道、DTS 自动在此出声，百分之百不静音)
                 try {
                     Class<?> clazz = Class.forName("com.google.android.exoplayer2.ext.ffmpeg.FfmpegAudioRenderer");
                     Constructor<?> constructor = clazz.getConstructor(
                             Handler.class, AudioRendererEventListener.class, AudioSink.class);
                     Renderer ffmpegRenderer = (Renderer) constructor.newInstance(eventHandler, eventListener, audioSink);
                     out.add(ffmpegRenderer);
-                    ffmpegAdded = true;
-                    writeDebugLog(context, "[buildAudioRenderers] FFmpegAudioRenderer 首发挂载成功！");
+                    writeDebugLog(context, "[buildAudioRenderers] FFmpeg 软解兜底就绪！");
                 } catch (Throwable e) {
-                    writeDebugLog(context, "[buildAudioRenderers] FFmpegAudioRenderer 异常: " + e.getMessage());
+                    writeDebugLog(context, "[buildAudioRenderers] FFmpeg 异常: " + e.getMessage());
                 }
-
-                // 2. 第二顺位：硬件音频解码器
-                out.add(new MediaCodecAudioRenderer(
-                        context, mediaCodecSelector, enableDecoderFallback, eventHandler, eventListener, audioSink));
             }
 
             @Nullable
@@ -432,7 +466,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     boolean enableAudioTrackPlaybackParams,
                     boolean enableOffload) {
 
-                // 核心修复：音频池必须始终允许最高 8 声道输入，SwitchableDownmixAudioProcessor 才能接收 6 声道并下混出声！
+                // 音频池恒定开放最高 8 声道输入，确保下混处理器顺利将 6 声道 EAC3 转为立体声出声
                 AudioCapabilities pcmCapabilities = new AudioCapabilities(new int[]{C.ENCODING_PCM_16BIT}, 8);
 
                 return new DefaultAudioSink.Builder(context)
