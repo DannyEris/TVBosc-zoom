@@ -490,7 +490,7 @@ public class PlayFragment extends BaseLazyFragment {
             }
 
             @Override
-            public void startExternalPlayer() {
+            public void startExternalPlayerByPackage(String packageName) {
                 if (TextUtils.isEmpty(webPlayUrl)) {
                     Toast.makeText(mContext, "当前暂无可播放地址", Toast.LENGTH_SHORT).show();
                     return;
@@ -499,83 +499,33 @@ public class PlayFragment extends BaseLazyFragment {
                     if (mVideoView != null) {
                         mVideoView.pause();
                     }
-                    final Intent queryIntent = new Intent(Intent.ACTION_VIEW);
-                    queryIntent.setDataAndType(Uri.parse(webPlayUrl), "video/*");
+                    Intent intent = new Intent(Intent.ACTION_VIEW);
+                    intent.setDataAndType(Uri.parse(webPlayUrl), "video/*");
+                    intent.setPackage(packageName); // 使用 setPackage 安全寻址，杜绝 setClassName 类名错位
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
 
-                    // 检索盒子上所有已安装的第三方视频播放应用
-                    final android.content.pm.PackageManager pm = requireActivity().getPackageManager();
-                    List<android.content.pm.ResolveInfo> resolveInfos = pm.queryIntentActivities(queryIntent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY);
-
-                    final List<android.content.pm.ResolveInfo> externalPlayers = new ArrayList<>();
-                    String myPackage = requireActivity().getPackageName();
-                    if (resolveInfos != null) {
-                        for (android.content.pm.ResolveInfo info : resolveInfos) {
-                            if (!myPackage.equals(info.activityInfo.packageName)) {
-                                externalPlayers.add(info);
-                            }
-                        }
+                    intent.putExtra("title", getCastTitle());
+                    long position = getCastPosition();
+                    if (position > 0) {
+                        intent.putExtra("position", (int) position);
                     }
 
-                    if (externalPlayers.isEmpty()) {
-                        Toast.makeText(mContext, "未检测到可用的第三方外部播放器", Toast.LENGTH_SHORT).show();
-                        return;
+                    if (webHeaderMap != null && !webHeaderMap.isEmpty()) {
+                        Bundle headersBundle = new Bundle();
+                        String[] headersArray = new String[webHeaderMap.size() * 2];
+                        int i = 0;
+                        for (Map.Entry<String, String> entry : webHeaderMap.entrySet()) {
+                            headersBundle.putString(entry.getKey(), entry.getValue());
+                            headersArray[i++] = entry.getKey();
+                            headersArray[i++] = entry.getValue();
+                        }
+                        intent.putExtra("headers", headersArray);
+                        intent.putExtra("android.media.intent.extra.HTTP_HEADERS", headersBundle);
                     }
 
-                    // 使用 TVBox 自带的遥控器深色弹窗 SelectDialog 优雅展示列表！
-                    SelectDialog<android.content.pm.ResolveInfo> dialog = new SelectDialog<>(requireActivity());
-                    dialog.setTip("选择外部播放器");
-                    dialog.setAdapter(new SelectDialogAdapter.SelectDialogInterface<android.content.pm.ResolveInfo>() {
-                        @Override
-                        public void click(android.content.pm.ResolveInfo value, int pos) {
-                            dialog.dismiss();
-                            try {
-                                Intent launchIntent = new Intent(Intent.ACTION_VIEW);
-                                launchIntent.setDataAndType(Uri.parse(webPlayUrl), "video/*");
-                                launchIntent.setClassName(value.activityInfo.packageName, value.activityInfo.name);
-                                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-
-                                launchIntent.putExtra("title", getCastTitle());
-                                long position = getCastPosition();
-                                if (position > 0) {
-                                    launchIntent.putExtra("position", (int) position);
-                                }
-
-                                if (webHeaderMap != null && !webHeaderMap.isEmpty()) {
-                                    Bundle headersBundle = new Bundle();
-                                    String[] headersArray = new String[webHeaderMap.size() * 2];
-                                    int i = 0;
-                                    for (Map.Entry<String, String> entry : webHeaderMap.entrySet()) {
-                                        headersBundle.putString(entry.getKey(), entry.getValue());
-                                        headersArray[i++] = entry.getKey();
-                                        headersArray[i++] = entry.getValue();
-                                    }
-                                    launchIntent.putExtra("headers", headersArray);
-                                    launchIntent.putExtra("android.media.intent.extra.HTTP_HEADERS", headersBundle);
-                                }
-                                startActivity(launchIntent);
-                            } catch (Exception e) {
-                                Toast.makeText(mContext, "启动失败: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-                            }
-                        }
-
-                        @Override
-                        public String getDisplay(android.content.pm.ResolveInfo val) {
-                            return val.loadLabel(pm).toString();
-                        }
-                    }, new DiffUtil.ItemCallback<android.content.pm.ResolveInfo>() {
-                        @Override
-                        public boolean areItemsTheSame(@NonNull @NotNull android.content.pm.ResolveInfo oldItem, @NonNull @NotNull android.content.pm.ResolveInfo newItem) {
-                            return oldItem.activityInfo.packageName.equals(newItem.activityInfo.packageName);
-                        }
-
-                        @Override
-                        public boolean areContentsTheSame(@NonNull @NotNull android.content.pm.ResolveInfo oldItem, @NonNull @NotNull android.content.pm.ResolveInfo newItem) {
-                            return oldItem.activityInfo.packageName.equals(newItem.activityInfo.packageName);
-                        }
-                    }, externalPlayers, 0);
-                    dialog.show();
+                    startActivity(intent);
                 } catch (Exception e) {
-                    Toast.makeText(mContext, "获取外部播放器失败: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                    Toast.makeText(mContext, "启动外部播放器失败: " + e.getMessage(), Toast.LENGTH_SHORT).show();
                 }
             }
         });
