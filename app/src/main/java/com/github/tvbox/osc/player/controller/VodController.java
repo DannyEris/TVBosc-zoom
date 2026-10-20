@@ -243,6 +243,7 @@ public class VodController extends BaseController {
     public TextView mPlayerSpeedBtn;
     TextView mPlayerBtn;
     TextView mPlayerIJKBtn;
+    TextView mTunnelBtn; // 隧道模式按键
     TextView mPlayerRetry;
     TextView mPlayrefresh;
     public TextView mPlayerTimeStartEndText;
@@ -371,6 +372,7 @@ public class VodController extends BaseController {
         mPlayerSpeedBtn = findViewById(R.id.play_speed);
         mPlayerBtn = findViewById(R.id.play_player);
         mPlayerIJKBtn = findViewById(R.id.play_ijk);
+        mTunnelBtn = findViewById(R.id.play_tunnel);
         mPlayerTimeStartEndText = findViewById(R.id.play_time_start_end_text);
         mPlayerTimeStartBtn = findViewById(R.id.play_time_start);
         mPlayerTimeSkipBtn = findViewById(R.id.play_time_end);
@@ -723,16 +725,20 @@ public class VodController extends BaseController {
             }
         });
 
-        // 点击底部播放器内核按钮直接弹出选择菜单
+        // 核心改造：点击播放器按钮直接弹出外部播放器应用选择列表（无需二级点击）
         mPlayerBtn.setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View view) {
                 myHandle.removeCallbacks(myRunnable);
                 myHandle.postDelayed(myRunnable, myHandleSeconds);
-                showPlayerSelectDialog();
+                if (listener != null) {
+                    listener.startExternalPlayer();
+                }
+                hideBottom();
             }
         });
 
+        // 长按保留弹出内置内核切换菜单 (备用切换 IJK / EXO)
         setOnTvLongClickListener(mPlayerBtn, new OnLongClickListener() {
             @Override
             public boolean onLongClick(View view) {
@@ -743,6 +749,18 @@ public class VodController extends BaseController {
                 return true;
             }
         });
+
+        // 隧道模式按键点击：切换 开/关 并热重载
+        if (mTunnelBtn != null) {
+            mTunnelBtn.setOnClickListener(new OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    myHandle.removeCallbacks(myRunnable);
+                    myHandle.postDelayed(myRunnable, myHandleSeconds);
+                    toggleTunnelMode();
+                }
+            });
+        }
 
         mPlayerIJKBtn.setOnClickListener(new OnClickListener() {
             @Override
@@ -1217,6 +1235,7 @@ public class VodController extends BaseController {
             mDanmuSettingBtn.setVisibility(GONE);
             mDanmuSearchUiBtn.setVisibility(GONE);
             mScreenDisplay.setVisibility(GONE);
+            if (mTunnelBtn != null) mTunnelBtn.setVisibility(GONE);
             return;
         }
 
@@ -1282,6 +1301,7 @@ public class VodController extends BaseController {
         try {
             int playerType = mPlayerConfig.getInt("pl");
             mPlayerBtn.setText(getPlayerShortName(playerType));
+            updateTunnelBtnView();
             mPlayerScaleBtn.setText(PlayerHelper.getScaleName(mPlayerConfig.getInt("sc")));
             mPlayerIJKBtn.setText(getCodecShortName(mPlayerConfig.getString("ijk")));
             mPlayerIJKBtn.setVisibility(playerType == 1 ? VISIBLE : GONE);
@@ -1296,6 +1316,42 @@ public class VodController extends BaseController {
         } catch (JSONException e) {
             e.printStackTrace();
         }
+    }
+    
+    private void toggleTunnelMode() {
+        boolean current = Hawk.get(HawkConfig.TUNNEL_MODE, false);
+        boolean next = !current;
+        Hawk.put(HawkConfig.TUNNEL_MODE, next);
+        updateTunnelBtnView();
+
+        xyz.doikki.videoplayer.player.AbstractPlayer player = null;
+        if (mActivity != null) {
+            com.github.tvbox.osc.player.MyVideoView vv = mActivity.findViewById(R.id.mVideoView);
+            if (vv != null) {
+                player = vv.getMediaPlayer();
+            }
+        }
+        if (player instanceof xyz.doikki.videoplayer.exo.ExoMediaPlayer) {
+            ((xyz.doikki.videoplayer.exo.ExoMediaPlayer) player).setTunneling(next);
+        }
+
+        // 触发轻量无缝重载以重置硬解管线，确保硬件音频时钟完成挂载
+        if (listener != null) {
+            listener.replay(false);
+        }
+        Toast.makeText(getContext(), next ? "隧道模式已开启 (硬件时钟直通)" : "隧道模式已关闭", Toast.LENGTH_SHORT).show();
+        hideBottom();
+    }
+
+    private void updateTunnelBtnView() {
+        if (mTunnelBtn == null) return;
+        boolean tunnel = Hawk.get(HawkConfig.TUNNEL_MODE, false);
+        mTunnelBtn.setText(tunnel ? "隧道:开" : "隧道:关");
+        mTunnelBtn.setTextColor(tunnel ? getResources().getColor(R.color.color_02F8E1) : Color.WHITE);
+
+        // 仅在当前使用的是 EXO 播放器时常驻显示（IJK 不走 Exo 隧道管线）
+        int playerType = mPlayerConfig != null ? mPlayerConfig.optInt("pl", 2) : 2;
+        mTunnelBtn.setVisibility(playerType == 2 ? VISIBLE : GONE);
     }
 
     private String getPlayerShortName(int playerType) {
