@@ -105,6 +105,7 @@ public class ModelSettingFragment extends BaseLazyFragment {
     private boolean selectLocalLive;
     private TextView tvDanmuOpenText;
     private TextView tvDanmuApiText;
+    private TextView tvDetailAutoPlayText;
 
     public static ModelSettingFragment newInstance() {
         return new ModelSettingFragment().setArguments();
@@ -182,6 +183,10 @@ public class ModelSettingFragment extends BaseLazyFragment {
         tvIjkCachePlay.setText(Hawk.get(HawkConfig.IJK_CACHE_PLAY, false) ? "开启" : "关闭");
         tvHomeDefaultShow = findViewById(R.id.tvHomeText);
         tvHomeDefaultShow.setText(Hawk.get(HawkConfig.DEFAULT_LOAD_LIVE, false) ? "直播" : "点播");
+        tvDetailAutoPlayText = findViewById(R.id.tvDetailAutoPlayText);
+        if (tvDetailAutoPlayText != null) {
+            tvDetailAutoPlayText.setText(Hawk.get(HawkConfig.DETAIL_AUTO_PLAY, true) ? "开启" : "关闭");
+        }
         findViewById(R.id.llDebug).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -890,6 +895,20 @@ public class ModelSettingFragment extends BaseLazyFragment {
                 tvAutoSwitchLineText.setText(enable ? "开启" : "关闭");
             }
         });
+        View llDetailAutoPlay = findViewById(R.id.llDetailAutoPlay);
+        if (llDetailAutoPlay != null) {
+            llDetailAutoPlay.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    FastClickCheckUtil.check(v);
+                    boolean enable = !Hawk.get(HawkConfig.DETAIL_AUTO_PLAY, true);
+                    Hawk.put(HawkConfig.DETAIL_AUTO_PLAY, enable);
+                    if (tvDetailAutoPlayText != null) {
+                        tvDetailAutoPlayText.setText(enable ? "开启" : "关闭");
+                    }
+                }
+            });
+        }
         findViewById(R.id.llHomeRecStyle).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
