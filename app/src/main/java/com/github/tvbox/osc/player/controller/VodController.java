@@ -725,20 +725,16 @@ public class VodController extends BaseController {
             }
         });
 
-        // 核心改造：点击播放器按钮直接弹出外部播放器应用选择列表（无需二级点击）
+        // 单击播放器按钮：直接列出所有播放器（内置 IJK/EXO + 外部 Kodi/MX + 系统已装播放器）
         mPlayerBtn.setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View view) {
                 myHandle.removeCallbacks(myRunnable);
                 myHandle.postDelayed(myRunnable, myHandleSeconds);
-                if (listener != null) {
-                    listener.startExternalPlayer();
-                }
-                hideBottom();
+                showPlayerSelectDialog();
             }
         });
 
-        // 长按保留弹出内置内核切换菜单 (备用切换 IJK / EXO)
         setOnTvLongClickListener(mPlayerBtn, new OnLongClickListener() {
             @Override
             public boolean onLongClick(View view) {
@@ -983,68 +979,100 @@ public class VodController extends BaseController {
         mNextBtn.setNextFocusLeftId(R.id.screen_display);
     }
 
+    // 播放器条目包装类
+    public static class PlayerItem {
+        public int playerType; // >0: 内置或 PlayerHelper 识别的播放器(Kodi等); -1: 其他第三方播放器
+        public String name;
+        public String packageName;
+
+        public PlayerItem(int playerType, String name) {
+            this.playerType = playerType;
+            this.name = name;
+        }
+
+        public PlayerItem(int playerType, String name, String packageName) {
+            this.playerType = playerType;
+            this.name = name;
+            this.packageName = packageName;
+        }
+    }
+
     private void showPlayerSelectDialog() {
         try {
-            int playerType = mPlayerConfig.getInt("pl");
+            int currentPlayerType = mPlayerConfig.getInt("pl");
             int defaultPos = 0;
-            ArrayList<Integer> players = PlayerHelper.getExistPlayerTypes();
-            // 在末尾追加“其他播放器”选项
-            players.add(PLAYER_TYPE_EXTERNAL);
+            final List<PlayerItem> items = new ArrayList<>();
 
-            ArrayList<Integer> renders = new ArrayList<>();
-            for (int p = 0; p < players.size(); p++) {
-                renders.add(p);
-                if (players.get(p) == playerType) {
-                    defaultPos = p;
+            // 1. 获取 PlayerHelper 支持并已安装的所有播放器（含 IJK、EXO、Kodi、MXPlayer 等）
+            ArrayList<Integer> existTypes = PlayerHelper.getExistPlayerTypes();
+            for (int type : existTypes) {
+                if (type == currentPlayerType) {
+                    defaultPos = items.size();
                 }
+                items.add(new PlayerItem(type, PlayerHelper.getPlayerName(type)));
             }
-            SelectDialog<Integer> dialog = new SelectDialog<>(mActivity);
-            dialog.setTip("请选择播放器");
-            dialog.setAdapter(new SelectDialogAdapter.SelectDialogInterface<Integer>() {
-                @Override
-                public void click(Integer value, int pos) {
-                    try {
-                        dialog.cancel();
-                        int thisPlayType = players.get(pos);
-                        if (thisPlayType == PLAYER_TYPE_EXTERNAL) {
-                            if (listener != null) {
-                                listener.startExternalPlayer();
-                            }
-                            hideBottom();
-                            return;
+
+            // 2. 检索系统中安装的其他第三方视频播放器应用（自动排除已收录的 Kodi、MX 等，防止重复）
+            try {
+                android.content.Intent queryIntent = new android.content.Intent(android.content.Intent.ACTION_VIEW);
+                queryIntent.setDataAndType(android.net.Uri.parse("http://127.0.0.1/test.mp4"), "video/*");
+                android.content.pm.PackageManager pm = getContext().getPackageManager();
+                List<android.content.pm.ResolveInfo> resolves = pm.queryIntentActivities(queryIntent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY);
+                String myPkg = getContext().getPackageName();
+                if (resolves != null) {
+                    for (android.content.pm.ResolveInfo info : resolves) {
+                        String pkg = info.activityInfo.packageName;
+                        if (pkg.equals(myPkg)) continue;
+                        if (pkg.contains("kodi") || pkg.contains("mxtech") || pkg.contains("reex")) {
+                            continue; // 已经由 PlayerHelper 完美接管，避免重复
                         }
-                        if (thisPlayType != playerType) {
-                            mPlayerConfig.put("pl", thisPlayType);
+                        items.add(new PlayerItem(-1, info.loadLabel(pm).toString(), pkg));
+                    }
+                }
+            } catch (Throwable ignored) {}
+
+            SelectDialog<PlayerItem> dialog = new SelectDialog<>(mActivity);
+            dialog.setTip("请选择播放器");
+            dialog.setAdapter(new SelectDialogAdapter.SelectDialogInterface<PlayerItem>() {
+                @Override
+                public void click(PlayerItem value, int pos) {
+                    dialog.dismiss();
+                    if (value.playerType > 0) {
+                        // 走验证通过的原生通道（内嵌播放器或 PlayerHelper 专用 Kodi/MX 调起逻辑）
+                        try {
+                            mPlayerConfig.put("pl", value.playerType);
                             updatePlayerCfgView();
                             listener.updatePlayerCfg();
                             listener.replay(false);
                             listener.setAllowSwitchPlayer(false);
                             hideBottom();
+                        } catch (Exception e) {
+                            e.printStackTrace();
                         }
-                    } catch (Exception e) {
-                        e.printStackTrace();
+                    } else if (value.packageName != null) {
+                        // 调起其他未收录的第三方播放器
+                        if (listener != null) {
+                            listener.startExternalPlayerByPackage(value.packageName);
+                        }
+                        hideBottom();
                     }
                 }
 
                 @Override
-                public String getDisplay(Integer val) {
-                    Integer pType = players.get(val);
-                    if (pType == PLAYER_TYPE_EXTERNAL) {
-                        return "其他播放器";
-                    }
-                    return PlayerHelper.getPlayerName(pType);
+                public String getDisplay(PlayerItem val) {
+                    return val.name;
                 }
-            }, new DiffUtil.ItemCallback<Integer>() {
+            }, new DiffUtil.ItemCallback<PlayerItem>() {
                 @Override
-                public boolean areItemsTheSame(@NonNull @NotNull Integer oldItem, @NonNull @NotNull Integer newItem) {
-                    return oldItem.intValue() == newItem.intValue();
+                public boolean areItemsTheSame(@NonNull @NotNull PlayerItem oldItem, @NonNull @NotNull PlayerItem newItem) {
+                    return oldItem.playerType == newItem.playerType && TextUtils.equals(oldItem.packageName, newItem.packageName);
                 }
 
                 @Override
-                public boolean areContentsTheSame(@NonNull @NotNull Integer oldItem, @NonNull @NotNull Integer newItem) {
-                    return oldItem.intValue() == newItem.intValue();
+                public boolean areContentsTheSame(@NonNull @NotNull PlayerItem oldItem, @NonNull @NotNull PlayerItem newItem) {
+                    return TextUtils.equals(oldItem.name, newItem.name);
                 }
-            }, renders, defaultPos);
+            }, items, defaultPos);
             dialog.show();
         } catch (JSONException e) {
             e.printStackTrace();
@@ -1461,6 +1489,8 @@ public class VodController extends BaseController {
         void onVideoZoomChange(float zoom);
 
         void startExternalPlayer();
+
+        void startExternalPlayerByPackage(String packageName);
     }
 
     public void setListener(VodControlListener listener) {
