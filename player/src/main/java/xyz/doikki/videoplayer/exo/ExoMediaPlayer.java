@@ -329,24 +329,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         eventListener,
                         50) {
 
-                    @Override
-                    @SuppressLint("InlinedApi")
-                    protected MediaFormat getMediaFormat(
-                            Format format,
-                            String codecMimeType,
-                            CodecMaxValues codecMaxValues,
-                            float codecOperatingRate,
-                            boolean deviceNeedsNoPostProcessWorkaround,
-                            int tunnelingAudioSessionId) {
-                        MediaFormat mediaFormat = super.getMediaFormat(
-                                format, codecMimeType, codecMaxValues, codecOperatingRate,
-                                deviceNeedsNoPostProcessWorkaround, tunnelingAudioSessionId);
-
-                        // 扩大输入缓冲至 4MB，确保 4K 码流中的大 I 帧完整喂入
-                        mediaFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4 * 1024 * 1024);
-                        return mediaFormat;
-                    }
-
+                    
                     @Override
                     @SuppressLint("InlinedApi")
                     protected MediaFormat getMediaFormat(
