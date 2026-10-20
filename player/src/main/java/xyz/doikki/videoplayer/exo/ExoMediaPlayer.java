@@ -403,25 +403,25 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     AudioRendererEventListener eventListener,
                     ArrayList<Renderer> out) {
 
-                writeDebugLog(context, "[buildAudioRenderers] 锁定 FFmpeg 第一顺位软解...");
+                writeDebugLog(context, "[buildAudioRenderers] 调整顺位：锁定 MediaCodec 硬件音频优先(支持隧道模式)...");
 
-                boolean ffmpegAdded = false;
+                // 1. 第一顺位：硬件音频解码器（支持与视频边带流打通硬件隧道直通）
+                out.add(new MediaCodecAudioRenderer(
+                        context, mediaCodecSelector, enableDecoderFallback, eventHandler, eventListener, audioSink));
+
+                // 2. 第二顺位：FFmpeg 软解兜底（在芯片无法硬解特殊音频流时接管）
                 try {
                     Class<?> clazz = Class.forName("com.google.android.exoplayer2.ext.ffmpeg.FfmpegAudioRenderer");
                     Constructor<?> constructor = clazz.getConstructor(
                             Handler.class, AudioRendererEventListener.class, AudioSink.class);
                     Renderer ffmpegRenderer = (Renderer) constructor.newInstance(eventHandler, eventListener, audioSink);
                     out.add(ffmpegRenderer);
-                    ffmpegAdded = true;
-                    writeDebugLog(context, "[buildAudioRenderers] FFmpegAudioRenderer 挂载成功！");
+                    writeDebugLog(context, "[buildAudioRenderers] FFmpegAudioRenderer 软解兜底挂载成功！");
                 } catch (Throwable e) {
                     writeDebugLog(context, "[buildAudioRenderers] FFmpegAudioRenderer 异常: " + e.getMessage());
                 }
-
-                out.add(new MediaCodecAudioRenderer(
-                        context, mediaCodecSelector, enableDecoderFallback, eventHandler, eventListener, audioSink));
             }
-
+            
             @Nullable
             @Override
             protected AudioSink buildAudioSink(
