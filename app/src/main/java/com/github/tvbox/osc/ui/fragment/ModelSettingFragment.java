@@ -79,6 +79,7 @@ public class ModelSettingFragment extends BaseLazyFragment {
     private TextView tvParseWebView;
     private TextView tvPlay;
     private TextView tvRender;
+    private TextView tvTunnelMode;
     private TextView tvPosterSize;
     private TextView tvHomePosterSize;
     private TextView tvScale;
@@ -168,6 +169,10 @@ public class ModelSettingFragment extends BaseLazyFragment {
         tvScale.setText(PlayerHelper.getScaleName(Hawk.get(HawkConfig.PLAY_SCALE, 0)));
         tvPlay.setText(PlayerHelper.getPlayerName(Hawk.get(HawkConfig.PLAY_TYPE, 2)));
         tvRender.setText(PlayerHelper.getRenderName(Hawk.get(HawkConfig.PLAY_RENDER, 1)));
+        tvTunnelMode = findViewById(R.id.tvTunnelMode);
+        if (tvTunnelMode != null) {
+            tvTunnelMode.setText(Hawk.get(HawkConfig.TUNNEL_MODE, false) ? "开启" : "关闭");
+        }
         tvPosterSize = findViewById(R.id.tvPosterSize);
         tvPosterSize.setText(getPosterSizeName(Hawk.get(HawkConfig.POSTER_SIZE, 0)));
         tvHomePosterSize = findViewById(R.id.tvHomePosterSize);
@@ -616,6 +621,21 @@ public class ModelSettingFragment extends BaseLazyFragment {
                 dialog.show();
             }
         });
+        View llTunnelMode = findViewById(R.id.llTunnelMode);
+        if (llTunnelMode != null) {
+            llTunnelMode.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    FastClickCheckUtil.check(v);
+                    boolean isTunnel = !Hawk.get(HawkConfig.TUNNEL_MODE, false);
+                    Hawk.put(HawkConfig.TUNNEL_MODE, isTunnel);
+                    if (tvTunnelMode != null) {
+                        tvTunnelMode.setText(isTunnel ? "开启" : "关闭");
+                    }
+                    Toast.makeText(mContext, isTunnel ? "隧道模式已开启 (硬件时钟直通)" : "隧道模式已关闭", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
         findViewById(R.id.llPosterSize).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
