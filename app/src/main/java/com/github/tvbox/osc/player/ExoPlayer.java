@@ -117,22 +117,15 @@ public class ExoPlayer extends ExoMediaPlayer {
         MappingTrackSelector.MappedTrackInfo mappedInfo = trackSelector.getCurrentMappedTrackInfo();
         if (mappedInfo == null) return data;
 
-        // 识别硬解与软解音频渲染器索引
-        int mediaCodecAudioIndex = -1;
-        int ffmpegAudioIndex = -1;
-        for (int r = 0; r < mappedInfo.getRendererCount(); r++) {
-            if (mappedInfo.getRendererType(r) == C.TRACK_TYPE_AUDIO) {
-                if (mediaCodecAudioIndex == -1) mediaCodecAudioIndex = r;
-                else if (ffmpegAudioIndex == -1) ffmpegAudioIndex = r;
-            }
-        }
+        // 锁定首选音频渲染器索引（即 FFmpeg 软解渲染器）
+        int primaryAudioIndex = findAudioRendererIndex(mappedInfo);
 
         for (int rendererIndex = 0; rendererIndex < mappedInfo.getRendererCount(); rendererIndex++) {
             int type = mappedInfo.getRendererType(rendererIndex);
             if (type != C.TRACK_TYPE_AUDIO && type != C.TRACK_TYPE_VIDEO && type != C.TRACK_TYPE_TEXT) continue;
 
-            // 核心修复 1：跳过第二音频渲染器，防止列表条目被重复添加两次！
-            if (rendererIndex == ffmpegAudioIndex) continue;
+            // 针对音频轨道：仅读取首选渲染器（FFmpeg），杜绝音轨重复与硬解分配错误
+            if (type == C.TRACK_TYPE_AUDIO && rendererIndex != primaryAudioIndex) continue;
 
             TrackGroupArray groups = mappedInfo.getTrackGroups(rendererIndex);
             for (int groupIndex = 0; groupIndex < groups.length; groupIndex++) {
@@ -147,20 +140,7 @@ public class ExoPlayer extends ExoMediaPlayer {
                     bean.name = buildDisplayName(type == C.TRACK_TYPE_AUDIO ? "\u97f3\u8f68" : type == C.TRACK_TYPE_VIDEO ? "\u89c6\u8f68" : "\u5b57\u5e55",
                             type == C.TRACK_TYPE_AUDIO ? data.getAudio().size() + 1 : type == C.TRACK_TYPE_VIDEO ? data.getVideo().size() + 1 : data.getSubtitle().size() + 1,
                             language, detail);
-
-                    // 核心修复 2：能力探测分流。硬解能解走硬解，硬解不支持自动将该音轨 renderId 绑定给 FFmpeg 软解！
-                    int targetRenderId = rendererIndex;
-                    if (type == C.TRACK_TYPE_AUDIO && mediaCodecAudioIndex != -1) {
-                        int trackSupport = mappedInfo.getTrackSupport(mediaCodecAudioIndex, groupIndex, trackIndex);
-                        boolean isHardwareSupported = (trackSupport & C.FORMAT_HANDLED) == C.FORMAT_HANDLED;
-                        if (!isHardwareSupported && ffmpegAudioIndex != -1) {
-                            targetRenderId = ffmpegAudioIndex;
-                        } else {
-                            targetRenderId = mediaCodecAudioIndex;
-                        }
-                    }
-
-                    bean.renderId = targetRenderId;
+                    bean.renderId = rendererIndex;
                     bean.trackGroupId = groupIndex;
                     bean.trackId = trackIndex;
                     bean.groupIndex = groupIndex;
