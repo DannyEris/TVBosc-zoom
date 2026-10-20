@@ -203,6 +203,22 @@ public class ExoPlayer extends ExoMediaPlayer {
                 return;
             }
 
+            // 安全防御：若目标渲染器（如硬解）不支持当前音轨，自动动态重定向到支持的渲染器（如软解）
+            if (mappedInfo.getRendererType(rendererIndex) == C.TRACK_TYPE_AUDIO) {
+                int trackSupport = mappedInfo.getTrackSupport(rendererIndex, groupIndex, trackIndex);
+                if ((trackSupport & C.FORMAT_HANDLED) != C.FORMAT_HANDLED) {
+                    for (int i = 0; i < mappedInfo.getRendererCount(); i++) {
+                        if (mappedInfo.getRendererType(i) == C.TRACK_TYPE_AUDIO && i != rendererIndex) {
+                            int altSupport = mappedInfo.getTrackSupport(i, groupIndex, trackIndex);
+                            if ((altSupport & C.FORMAT_HANDLED) == C.FORMAT_HANDLED) {
+                                rendererIndex = i;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
             TrackGroupArray groups = mappedInfo.getTrackGroups(rendererIndex);
             if (!isTrackIndexValid(groups, groupIndex, trackIndex)) {
                 LOG.i("echo-setTrack: Invalid track index - group:" + groupIndex + ", track:" + trackIndex);
