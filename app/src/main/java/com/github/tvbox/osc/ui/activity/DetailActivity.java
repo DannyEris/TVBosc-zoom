@@ -151,7 +151,8 @@ public class DetailActivity extends BaseActivity {
     private int selectedSeriesGroupPosition;
     private int GroupCount;
     private int qualityPosition;
-    boolean showPreview = Hawk.get(HawkConfig.SHOW_PREVIEW, true);; // true 开启 false 关闭
+    boolean showPreview = Hawk.get(HawkConfig.SHOW_PREVIEW, true); // true 开启 false 关闭
+    boolean detailAutoPlay = Hawk.get(HawkConfig.DETAIL_AUTO_PLAY, true); // 详情页是否自动起播
 
     private LinearSmoothScroller smoothScroller;
 
@@ -293,6 +294,9 @@ public class DetailActivity extends BaseActivity {
         mSeriesGroupView.setAdapter(seriesGroupAdapter);
 
         llPlayerFragmentContainerBlock.setOnClickListener(v -> {
+            if (showPreview && !detailAutoPlay && previewVodInfo == null) {
+                jumpToPlay();
+            }
             enterFullPreview();
             if (firstReverse) {
                 jumpToPlay();
@@ -305,6 +309,9 @@ public class DetailActivity extends BaseActivity {
             public void onClick(View v) {
                 FastClickCheckUtil.check(v);
                 if (showPreview) {
+                    if (!detailAutoPlay && previewVodInfo == null) {
+                        jumpToPlay();
+                    }
                     enterFullPreview();
                     if(firstReverse){
                         jumpToPlay();
@@ -647,6 +654,8 @@ public class DetailActivity extends BaseActivity {
 //            bundle.putSerializable("VodInfo", vodInfo);
             App.getInstance().setVodInfo(vodInfo);
             if (showPreview) {
+                if (thumbContainer != null) thumbContainer.setVisibility(View.GONE);
+                if (llPlayerFragmentContainer != null) llPlayerFragmentContainer.setVisibility(View.VISIBLE);
                 ensurePlayFragment();
                 updatePreviewVodInfo();
                 App.getInstance().setVodInfo(previewVodInfo);
@@ -833,9 +842,10 @@ public class DetailActivity extends BaseActivity {
     }
 
     private void applyThumbPreviewStyle() {
-        thumbContainer.setVisibility(showPreview ? View.GONE : View.VISIBLE);
+        boolean showCover = !showPreview || !detailAutoPlay;
+        thumbContainer.setVisibility(showCover ? View.VISIBLE : View.GONE);
         llPlayerPlace.setVisibility(showPreview ? View.VISIBLE : View.GONE);
-        ivThumb.setVisibility(!showPreview ? View.VISIBLE : View.GONE);
+        ivThumb.setVisibility(showCover ? View.VISIBLE : View.GONE);
         thumbContainer.setBackgroundResource(showPreview ? R.drawable.shape_detail_thumb_bg : R.drawable.shape_detail_thumb_idle_bg);
     }
 
@@ -964,8 +974,15 @@ public class DetailActivity extends BaseActivity {
 
                         refreshList();
                         if (showPreview) {
-                            jumpToPlay();
-                            llPlayerFragmentContainer.setVisibility(View.VISIBLE);
+                            if (detailAutoPlay) {
+                                jumpToPlay();
+                                llPlayerFragmentContainer.setVisibility(View.VISIBLE);
+                            } else {
+                                // 自动播放关闭：维持封面显示，不调用 jumpToPlay 取流
+                                if (thumbContainer != null) thumbContainer.setVisibility(View.VISIBLE);
+                                if (ivThumb != null) ivThumb.setVisibility(View.VISIBLE);
+                                if (llPlayerFragmentContainer != null) llPlayerFragmentContainer.setVisibility(View.GONE);
+                            }
                             llPlayerFragmentContainerBlock.setVisibility(View.VISIBLE);
                             toggleSubtitleTextSize();
                         }
