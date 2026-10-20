@@ -403,25 +403,27 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     AudioRendererEventListener eventListener,
                     ArrayList<Renderer> out) {
 
-                writeDebugLog(context, "[buildAudioRenderers] 调整顺位：锁定 MediaCodec 硬件音频优先(支持隧道模式)...");
+                writeDebugLog(context, "[buildAudioRenderers] 恢复 FFmpeg 第一顺位软解(支持 EAC3/DTS 全格式解码)...");
 
-                // 1. 第一顺位：硬件音频解码器（支持与视频边带流打通硬件隧道直通）
-                out.add(new MediaCodecAudioRenderer(
-                        context, mediaCodecSelector, enableDecoderFallback, eventHandler, eventListener, audioSink));
-
-                // 2. 第二顺位：FFmpeg 软解兜底（在芯片无法硬解特殊音频流时接管）
+                // 1. 第一顺位：FFmpeg 软解（确保 EAC3、AC3、DTS、TrueHD 全格式百分之百出声）
+                boolean ffmpegAdded = false;
                 try {
                     Class<?> clazz = Class.forName("com.google.android.exoplayer2.ext.ffmpeg.FfmpegAudioRenderer");
                     Constructor<?> constructor = clazz.getConstructor(
                             Handler.class, AudioRendererEventListener.class, AudioSink.class);
                     Renderer ffmpegRenderer = (Renderer) constructor.newInstance(eventHandler, eventListener, audioSink);
                     out.add(ffmpegRenderer);
-                    writeDebugLog(context, "[buildAudioRenderers] FFmpegAudioRenderer 软解兜底挂载成功！");
+                    ffmpegAdded = true;
+                    writeDebugLog(context, "[buildAudioRenderers] FFmpegAudioRenderer 首发挂载成功！");
                 } catch (Throwable e) {
                     writeDebugLog(context, "[buildAudioRenderers] FFmpegAudioRenderer 异常: " + e.getMessage());
                 }
+
+                // 2. 第二顺位：硬件音频解码器
+                out.add(new MediaCodecAudioRenderer(
+                        context, mediaCodecSelector, enableDecoderFallback, eventHandler, eventListener, audioSink));
             }
-            
+
             @Nullable
             @Override
             protected AudioSink buildAudioSink(
@@ -430,8 +432,8 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     boolean enableAudioTrackPlaybackParams,
                     boolean enableOffload) {
 
-                int maxChannels = enableMultiChannel ? 8 : 2;
-                AudioCapabilities pcmCapabilities = new AudioCapabilities(new int[]{C.ENCODING_PCM_16BIT}, maxChannels);
+                // 核心修复：音频池必须始终允许最高 8 声道输入，SwitchableDownmixAudioProcessor 才能接收 6 声道并下混出声！
+                AudioCapabilities pcmCapabilities = new AudioCapabilities(new int[]{C.ENCODING_PCM_16BIT}, 8);
 
                 return new DefaultAudioSink.Builder(context)
                         .setAudioCapabilities(pcmCapabilities)
