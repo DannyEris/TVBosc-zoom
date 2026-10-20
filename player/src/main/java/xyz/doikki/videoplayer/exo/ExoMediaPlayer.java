@@ -354,9 +354,13 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         return mediaFormat;
                     }
 
-                    // 恢复 ExoPlayer 原生平滑追赶机制：仅在落后严重 (>500ms) 时跨 GOP 自愈，普通播放绝不卡顿
+                    // 核心优化：缩紧追赶阈值从默认的 500ms 至 100ms，彻底消除半秒悬挂延迟！
                     @Override
                     protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
+                        // 画面落后音频超过 100ms (约 6 帧) 时立即自愈追平，绝不让延迟累加
+                        if (earlyUs < -100_000) {
+                            return true;
+                        }
                         return super.shouldDropBuffersToKeyframe(earlyUs, elapsedRealtimeUs, isLastBuffer);
                     }
 
@@ -502,13 +506,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
-        if (path != null) {
-            // 锁定代理并发为 8 线程，全力保障 4K 高码率吞吐
-            if (path.contains("thread=")) {
-                path = path.replaceAll("thread=\\d+", "thread=8");
-                writeDebugLog(mAppContext, "[并发优化] 锁定代理并发为 8 线程，全力保障 4K 高码率吞吐");
-            }
-        }
         writeDebugLog(mAppContext, "setDataSource: " + path);
         currentPlayPath = path;
         currentHeaders = copyHeaders(headers);
