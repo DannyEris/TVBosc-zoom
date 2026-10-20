@@ -117,22 +117,9 @@ public class ExoPlayer extends ExoMediaPlayer {
         MappingTrackSelector.MappedTrackInfo mappedInfo = trackSelector.getCurrentMappedTrackInfo();
         if (mappedInfo == null) return data;
 
-        // 识别硬解与软解音频渲染器索引
-        int mediaCodecAudioIndex = -1;
-        int ffmpegAudioIndex = -1;
-        for (int r = 0; r < mappedInfo.getRendererCount(); r++) {
-            if (mappedInfo.getRendererType(r) == C.TRACK_TYPE_AUDIO) {
-                if (mediaCodecAudioIndex == -1) mediaCodecAudioIndex = r;
-                else if (ffmpegAudioIndex == -1) ffmpegAudioIndex = r;
-            }
-        }
-
         for (int rendererIndex = 0; rendererIndex < mappedInfo.getRendererCount(); rendererIndex++) {
             int type = mappedInfo.getRendererType(rendererIndex);
             if (type != C.TRACK_TYPE_AUDIO && type != C.TRACK_TYPE_VIDEO && type != C.TRACK_TYPE_TEXT) continue;
-
-            // 核心修复 1：跳过第二音频渲染器，防止列表条目被重复添加两次
-            if (rendererIndex == ffmpegAudioIndex) continue;
 
             TrackGroupArray groups = mappedInfo.getTrackGroups(rendererIndex);
             for (int groupIndex = 0; groupIndex < groups.length; groupIndex++) {
@@ -148,19 +135,8 @@ public class ExoPlayer extends ExoMediaPlayer {
                             type == C.TRACK_TYPE_AUDIO ? data.getAudio().size() + 1 : type == C.TRACK_TYPE_VIDEO ? data.getVideo().size() + 1 : data.getSubtitle().size() + 1,
                             language, detail);
 
-                    // 核心修复 2：能力探测分流。硬解能解走硬解，硬解不支持自动将该音轨 renderId 绑定给 FFmpeg 软解
-                    int targetRenderId = rendererIndex;
-                    if (type == C.TRACK_TYPE_AUDIO && mediaCodecAudioIndex != -1) {
-                        int trackSupport = mappedInfo.getTrackSupport(mediaCodecAudioIndex, groupIndex, trackIndex);
-                        boolean isHardwareSupported = (trackSupport & C.FORMAT_HANDLED) == C.FORMAT_HANDLED;
-                        if (!isHardwareSupported && ffmpegAudioIndex != -1) {
-                            targetRenderId = ffmpegAudioIndex;
-                        } else {
-                            targetRenderId = mediaCodecAudioIndex;
-                        }
-                    }
-
-                    bean.renderId = targetRenderId;
+                    // 精准绑定：AAC 音轨自然携带 MediaCodec 索引，EAC3 音轨自然携带 FFmpeg 索引
+                    bean.renderId = rendererIndex;
                     bean.trackGroupId = groupIndex;
                     bean.trackId = trackIndex;
                     bean.groupIndex = groupIndex;
@@ -203,22 +179,6 @@ public class ExoPlayer extends ExoMediaPlayer {
                 return;
             }
 
-            // 安全防御：若目标渲染器（如硬解）不支持当前音轨，自动动态重定向到支持的渲染器（如软解）
-            if (mappedInfo.getRendererType(rendererIndex) == C.TRACK_TYPE_AUDIO) {
-                int trackSupport = mappedInfo.getTrackSupport(rendererIndex, groupIndex, trackIndex);
-                if ((trackSupport & C.FORMAT_HANDLED) != C.FORMAT_HANDLED) {
-                    for (int i = 0; i < mappedInfo.getRendererCount(); i++) {
-                        if (mappedInfo.getRendererType(i) == C.TRACK_TYPE_AUDIO && i != rendererIndex) {
-                            int altSupport = mappedInfo.getTrackSupport(i, groupIndex, trackIndex);
-                            if ((altSupport & C.FORMAT_HANDLED) == C.FORMAT_HANDLED) {
-                                rendererIndex = i;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
             TrackGroupArray groups = mappedInfo.getTrackGroups(rendererIndex);
             if (!isTrackIndexValid(groups, groupIndex, trackIndex)) {
                 LOG.i("echo-setTrack: Invalid track index - group:" + groupIndex + ", track:" + trackIndex);
@@ -228,8 +188,8 @@ public class ExoPlayer extends ExoMediaPlayer {
                     new DefaultTrackSelector.SelectionOverride(groupIndex, trackIndex);
             DefaultTrackSelector.Parameters.Builder builder = trackSelector.buildUponParameters();
 
-            // 核心修复 3：音频渲染器互斥禁用机制！
-            // 选中的音频渲染器激活，另一个音频渲染器彻底禁用并清空，释放 AudioSink 独占权
+            // 音频渲染器互斥激活机制：
+            // 选中的音频渲染器放行并下发 override，另一个音频渲染器彻底禁用，释放 AudioSink 独占权
             if (mappedInfo.getRendererType(rendererIndex) == C.TRACK_TYPE_AUDIO) {
                 for (int i = 0; i < mappedInfo.getRendererCount(); i++) {
                     if (mappedInfo.getRendererType(i) == C.TRACK_TYPE_AUDIO) {
