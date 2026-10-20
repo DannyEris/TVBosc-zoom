@@ -490,6 +490,11 @@ public class PlayFragment extends BaseLazyFragment {
             }
 
             @Override
+            public void startExternalPlayer() {
+                startExternalPlayerByPackage(null);
+            }
+
+            @Override
             public void startExternalPlayerByPackage(String packageName) {
                 if (TextUtils.isEmpty(webPlayUrl)) {
                     Toast.makeText(mContext, "当前暂无可播放地址", Toast.LENGTH_SHORT).show();
@@ -501,28 +506,30 @@ public class PlayFragment extends BaseLazyFragment {
                     }
                     Intent intent = new Intent(Intent.ACTION_VIEW);
                     intent.setDataAndType(Uri.parse(webPlayUrl), "video/*");
-                    intent.setPackage(packageName); // 1. 采用 setPackage 安全寻址，彻底杜绝类名权限拒绝导致的闪退
+                    if (!TextUtils.isEmpty(packageName)) {
+                        intent.setPackage(packageName);
+                    }
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION);
 
                     String title = getCastTitle();
                     long position = getCastPosition();
 
-                    // 2. 标题协议多重兼容 (覆盖 Nova, MX, 当贝, nPlayer, MPV)
+                    // 标题协议兼容 (覆盖 Nova, MX, 当贝, nPlayer, MPV)
                     intent.putExtra("title", title);
                     intent.putExtra("forcename", title);
                     intent.putExtra("display_name", title);
 
-                    // 3. 播放进度协议多重兼容 (整型与长整型全灌入，适配 VLC/Nova/当贝)
+                    // 播放进度协议兼容 (整型与长整型全注入，适配 VLC/Nova/当贝)
                     if (position > 0) {
-                        intent.putExtra("position", (int) position);    // MX, 当贝, Nova 常用
-                        intent.putExtra("position", position);          // 标准 Long
-                        intent.putExtra("extra_position", position);    // VLC 专有进度协议
-                        intent.putExtra("from_start", false);           // VLC 专有续播标记
+                        intent.putExtra("position", (int) position);
+                        intent.putExtra("position", position);
+                        intent.putExtra("extra_position", position);
+                        intent.putExtra("from_start", false);
                     } else {
                         intent.putExtra("from_start", true);
                     }
 
-                    // 4. 外挂字幕通道注入 (针对 Nova, nPlayer)
+                    // 外挂字幕通道注入
                     if (!TextUtils.isEmpty(playSubtitle)) {
                         Uri subUri = Uri.parse(playSubtitle);
                         intent.putExtra("subs", new Uri[]{subUri});
@@ -530,7 +537,7 @@ public class PlayFragment extends BaseLazyFragment {
                         intent.putExtra("subs.enable", new Uri[]{subUri});
                     }
 
-                    // 5. 防盗链请求头 (Headers) 矩阵封装 (确保网盘高码率防盗链流在外部播放器正常起播)
+                    // 防盗链请求头 (Headers) 矩阵封装
                     if (webHeaderMap != null && !webHeaderMap.isEmpty()) {
                         Bundle headersBundle = new Bundle();
                         String[] headersArray = new String[webHeaderMap.size() * 2];
@@ -540,15 +547,16 @@ public class PlayFragment extends BaseLazyFragment {
                             headersArray[i++] = entry.getKey();
                             headersArray[i++] = entry.getValue();
                         }
-                        // Android 标准协议
                         intent.putExtra("android.media.intent.extra.HTTP_HEADERS", headersBundle);
-                        // MX Player / Nova / 当贝 专有数组协议
                         intent.putExtra("headers", headersArray);
-                        // 通用序列化协议
                         intent.putExtra("headers_bundle", headersBundle);
                     }
 
-                    startActivity(intent);
+                    if (TextUtils.isEmpty(packageName)) {
+                        startActivity(Intent.createChooser(intent, "选择外部播放器"));
+                    } else {
+                        startActivity(intent);
+                    }
                 } catch (Exception e) {
                     Toast.makeText(mContext, "启动第三方播放器失败: " + e.getMessage(), Toast.LENGTH_SHORT).show();
                 }
