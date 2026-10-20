@@ -69,5 +69,6 @@ public class HawkConfig {
     public static final String DANMU_API = "danmu_api";
     public static final String POSTER_SIZE = "poster_size"; // 0: 大图(5列), 1: 中/标准(6列), 2: 小图(7列)
     public static final String HOME_POSTER_SIZE = "home_poster_size"; // 0: 大图(5列), 1: 中(6列), 2: 小图(7列)
+    public static final String DETAIL_AUTO_PLAY = "detail_auto_play"; // 详情页自动播放 (true: 开启, false: 关闭)
     public static boolean hotVodDelete;
 }
