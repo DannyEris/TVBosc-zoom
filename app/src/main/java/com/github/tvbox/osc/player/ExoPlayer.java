@@ -59,6 +59,9 @@ public class ExoPlayer extends ExoMediaPlayer {
     @Override
     public void initPlayer() {
         super.initPlayer();
+        // 自动注入全局隧道模式配置
+        boolean tunnelEnable = com.orhanobut.hawk.Hawk.get(com.github.tvbox.osc.util.HawkConfig.TUNNEL_MODE, false);
+        setTunneling(tunnelEnable);
         mInternalPlayer.addListener(new Player.Listener() {
             @Override
             public void onTracksChanged(Tracks tracks) {
