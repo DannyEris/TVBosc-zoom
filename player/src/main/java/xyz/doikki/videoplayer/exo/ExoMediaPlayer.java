@@ -865,4 +865,21 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             mInternalPlayer.setVideoScalingMode(videoScalingMode);
         }
     }
+
+    // 动态配置 ExoPlayer 硬件音频时钟直通（隧道模式）
+    public void setTunneling(boolean enable) {
+        if (trackSelector != null) {
+            trackSelector.setParameters(
+                    trackSelector.buildUponParameters()
+                            .setTunnelingEnabled(enable));
+            writeDebugLog(mAppContext, "[隧道模式] 硬件直通参数已写入: " + (enable ? "开启" : "关闭"));
+        }
+    }
+
+    public boolean isTunneling() {
+        if (trackSelector != null) {
+            return trackSelector.getParameters().tunnelingEnabled;
+        }
+        return false;
+    }
 }
