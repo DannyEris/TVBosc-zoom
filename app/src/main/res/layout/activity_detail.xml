@@ -388,6 +388,19 @@
         android:background="@drawable/preview_player_round"
         android:visibility="gone" />
 
+    <!-- 新增：与播放窗口尺寸(470x300)、坐标(50,20)完全一致的静态封面，起播前后布局零变动零跳动 -->
+    <ImageView
+        android:id="@+id/previewPlayerCover"
+        android:layout_width="@dimen/vs_470"
+        android:layout_height="@dimen/vs_300"
+        android:layout_marginStart="@dimen/vs_50"
+        android:layout_marginLeft="@dimen/vs_50"
+        android:layout_marginTop="@dimen/vs_20"
+        android:layout_marginBottom="@dimen/vs_10"
+        android:background="@drawable/preview_player_round"
+        android:scaleType="fitCenter"
+        android:visibility="gone" />
+
     <View
         android:id="@+id/previewPlayerBlock"
         android:layout_width="@dimen/vs_470"
