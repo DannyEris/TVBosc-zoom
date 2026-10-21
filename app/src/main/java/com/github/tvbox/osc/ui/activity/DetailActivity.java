@@ -655,6 +655,7 @@ public class DetailActivity extends BaseActivity {
             App.getInstance().setVodInfo(vodInfo);
             if (showPreview) {
                 if (thumbContainer != null) thumbContainer.setVisibility(View.GONE);
+                if (llPlayerPlace != null) llPlayerPlace.setVisibility(View.VISIBLE);
                 if (llPlayerFragmentContainer != null) llPlayerFragmentContainer.setVisibility(View.VISIBLE);
                 ensurePlayFragment();
                 updatePreviewVodInfo();
@@ -838,16 +839,53 @@ public class DetailActivity extends BaseActivity {
         llPlayerFragmentContainer.setClipToOutline(true);
         llPlayerFragmentContainer.setOutlineProvider(provider);
         llPlayerFragmentContainerBlock.setClipToOutline(true);
-        llPlayerFragmentContainerBlock.setOutlineProvider(provider);
+        llPlayerFragmentContainerBlock.setClipToOutline(provider);
+        if (thumbContainer != null) {
+            thumbContainer.setClipToOutline(true);
+            thumbContainer.setOutlineProvider(provider);
+        }
     }
 
     private void applyThumbPreviewStyle() {
-        boolean showCover = !showPreview || !detailAutoPlay;
-        thumbContainer.setVisibility(showCover ? View.VISIBLE : View.GONE);
-        llPlayerPlace.setVisibility(showPreview ? View.VISIBLE : View.GONE);
-        ivThumb.setVisibility(showCover ? View.VISIBLE : View.GONE);
-        thumbContainer.setBackgroundResource(showPreview ? R.drawable.shape_detail_thumb_bg : R.drawable.shape_detail_thumb_idle_bg);
+        if (showPreview) {
+            // 核心修复：强行将封面容器的尺寸锁定为小窗占位符的 16:9 宽高，绝不被竖版海报撑大！
+            if (llPlayerPlace != null && thumbContainer != null) {
+                ViewGroup.LayoutParams placeParams = llPlayerPlace.getLayoutParams();
+                if (placeParams != null) {
+                    ViewGroup.LayoutParams thumbParams = thumbContainer.getLayoutParams();
+                    if (thumbParams != null) {
+                        thumbParams.width = placeParams.width;
+                        thumbParams.height = placeParams.height;
+                        thumbContainer.setLayoutParams(thumbParams);
+                    }
+                }
+            }
+            if (ivThumb != null) {
+                ViewGroup.LayoutParams ivParams = ivThumb.getLayoutParams();
+                if (ivParams != null) {
+                    ivParams.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                    ivParams.height = ViewGroup.LayoutParams.MATCH_PARENT;
+                    ivThumb.setLayoutParams(ivParams);
+                }
+                // 图片按原比例自适应居中嵌入小窗口内，不拉伸变形，不裁剪
+                ivThumb.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            }
+            thumbContainer.setBackgroundColor(Color.BLACK); // 仿播放器黑底风格
+            applyPreviewRoundCorners();
+
+            boolean showCover = !detailAutoPlay;
+            thumbContainer.setVisibility(showCover ? View.VISIBLE : View.GONE);
+            llPlayerPlace.setVisibility(showCover ? View.GONE : View.VISIBLE);
+            ivThumb.setVisibility(showCover ? View.VISIBLE : View.GONE);
+        } else {
+            // 原生关闭窗口预览模式（保持原汁原味的竖版海报）
+            thumbContainer.setVisibility(View.VISIBLE);
+            llPlayerPlace.setVisibility(View.GONE);
+            ivThumb.setVisibility(View.VISIBLE);
+            thumbContainer.setBackgroundResource(R.drawable.shape_detail_thumb_idle_bg);
+        }
     }
+3. 修正起播切
 
     private void setPreviewRoundClip(boolean enable) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
@@ -974,13 +1012,15 @@ public class DetailActivity extends BaseActivity {
 
                         refreshList();
                         if (showPreview) {
+                            applyThumbPreviewStyle();
                             if (detailAutoPlay) {
                                 jumpToPlay();
                                 llPlayerFragmentContainer.setVisibility(View.VISIBLE);
                             } else {
-                                // 自动播放关闭：维持封面显示，不调用 jumpToPlay 取流
+                                // 自动播放关闭：维持封面静止展示，隐藏真实播放器与占位符，尺寸完全契合
                                 if (thumbContainer != null) thumbContainer.setVisibility(View.VISIBLE);
                                 if (ivThumb != null) ivThumb.setVisibility(View.VISIBLE);
+                                if (llPlayerPlace != null) llPlayerPlace.setVisibility(View.GONE);
                                 if (llPlayerFragmentContainer != null) llPlayerFragmentContainer.setVisibility(View.GONE);
                             }
                             llPlayerFragmentContainerBlock.setVisibility(View.VISIBLE);
