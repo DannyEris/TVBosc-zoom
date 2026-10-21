@@ -848,18 +848,23 @@ public class DetailActivity extends BaseActivity {
 
     private void applyThumbPreviewStyle() {
         if (showPreview) {
-            // 核心修复：强行将封面容器的尺寸锁定为小窗占位符的 16:9 宽高，绝不被竖版海报撑大！
-            if (llPlayerPlace != null && thumbContainer != null) {
-                ViewGroup.LayoutParams placeParams = llPlayerPlace.getLayoutParams();
-                if (placeParams != null) {
-                    ViewGroup.LayoutParams thumbParams = thumbContainer.getLayoutParams();
-                    if (thumbParams != null) {
-                        thumbParams.width = placeParams.width;
-                        thumbParams.height = placeParams.height;
-                        thumbContainer.setLayoutParams(thumbParams);
+            // 核心保障：llPlayerPlace 全程保持显示，锁定 16:9 布局基准，杜绝页面跳动
+            if (llPlayerPlace != null) {
+                llPlayerPlace.setVisibility(View.VISIBLE);
+                // 让封面容器与播放器小窗占位尺寸 1:1 绝对强绑定
+                if (thumbContainer != null) {
+                    ViewGroup.LayoutParams placeParams = llPlayerPlace.getLayoutParams();
+                    if (placeParams != null) {
+                        ViewGroup.LayoutParams thumbParams = thumbContainer.getLayoutParams();
+                        if (thumbParams != null) {
+                            thumbParams.width = placeParams.width;
+                            thumbParams.height = placeParams.height;
+                            thumbContainer.setLayoutParams(thumbParams);
+                        }
                     }
                 }
             }
+
             if (ivThumb != null) {
                 ViewGroup.LayoutParams ivParams = ivThumb.getLayoutParams();
                 if (ivParams != null) {
@@ -867,22 +872,26 @@ public class DetailActivity extends BaseActivity {
                     ivParams.height = ViewGroup.LayoutParams.MATCH_PARENT;
                     ivThumb.setLayoutParams(ivParams);
                 }
-                // 图片按原比例自适应居中嵌入小窗口内，不拉伸变形，不裁剪
-                ivThumb.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                ivThumb.setScaleType(ImageView.ScaleType.FIT_CENTER); // 封面自适应居中嵌入 16:9 窗口
             }
-            thumbContainer.setBackgroundColor(Color.BLACK); // 仿播放器黑底风格
+
+            if (thumbContainer != null) {
+                thumbContainer.setBackgroundColor(Color.BLACK);
+            }
             applyPreviewRoundCorners();
 
-            boolean showCover = !detailAutoPlay;
-            thumbContainer.setVisibility(showCover ? View.VISIBLE : View.GONE);
-            llPlayerPlace.setVisibility(showCover ? View.GONE : View.VISIBLE);
-            ivThumb.setVisibility(showCover ? View.VISIBLE : View.GONE);
+            // 无论 detailAutoPlay 是否开启，初始状态只由封面负责遮罩，不改变占位大小
+            boolean showCover = !detailAutoPlay && (previewVodInfo == null);
+            if (thumbContainer != null) thumbContainer.setVisibility(showCover ? View.VISIBLE : View.GONE);
+            if (ivThumb != null) ivThumb.setVisibility(showCover ? View.VISIBLE : View.GONE);
+            if (llPlayerFragmentContainer != null) {
+                llPlayerFragmentContainer.setVisibility(showCover ? View.INVISIBLE : View.VISIBLE);
+            }
         } else {
-            // 原生关闭窗口预览模式（保持原汁原味的竖版海报）
-            thumbContainer.setVisibility(View.VISIBLE);
-            llPlayerPlace.setVisibility(View.GONE);
-            ivThumb.setVisibility(View.VISIBLE);
-            thumbContainer.setBackgroundResource(R.drawable.shape_detail_thumb_idle_bg);
+            if (thumbContainer != null) thumbContainer.setVisibility(View.VISIBLE);
+            if (llPlayerPlace != null) llPlayerPlace.setVisibility(View.GONE);
+            if (ivThumb != null) ivThumb.setVisibility(View.VISIBLE);
+            if (thumbContainer != null) thumbContainer.setBackgroundResource(R.drawable.shape_detail_thumb_idle_bg);
         }
     }
 
@@ -1014,13 +1023,12 @@ public class DetailActivity extends BaseActivity {
                             applyThumbPreviewStyle();
                             if (detailAutoPlay) {
                                 jumpToPlay();
-                                llPlayerFragmentContainer.setVisibility(View.VISIBLE);
                             } else {
-                                // 自动播放关闭：维持封面静止展示，隐藏真实播放器与占位符，尺寸完全契合
+                                // 关自动播放：封面置顶，保持 16:9 占位坚决不隐藏，不调用 jumpToPlay 取流
                                 if (thumbContainer != null) thumbContainer.setVisibility(View.VISIBLE);
                                 if (ivThumb != null) ivThumb.setVisibility(View.VISIBLE);
-                                if (llPlayerPlace != null) llPlayerPlace.setVisibility(View.GONE);
-                                if (llPlayerFragmentContainer != null) llPlayerFragmentContainer.setVisibility(View.GONE);
+                                if (llPlayerPlace != null) llPlayerPlace.setVisibility(View.VISIBLE);
+                                if (llPlayerFragmentContainer != null) llPlayerFragmentContainer.setVisibility(View.INVISIBLE);
                             }
                             llPlayerFragmentContainerBlock.setVisibility(View.VISIBLE);
                             toggleSubtitleTextSize();
