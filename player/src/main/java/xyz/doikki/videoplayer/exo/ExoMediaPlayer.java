@@ -354,20 +354,17 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         return mediaFormat;
                     }
 
-                    // 核心优化：缩紧追赶阈值从默认的 500ms 至 100ms，彻底消除半秒悬挂延迟！
+                    // 1. 恢复 GOP 级安全追赶（容忍门槛放宽回 500ms，杜绝破坏参考帧队列）
                     @Override
                     protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        // 画面落后音频超过 100ms (约 6 帧) 时立即自愈追平，绝不让延迟累加
-                        if (earlyUs < -100_000) {
-                            return true;
-                        }
-                        return super.shouldDropBuffersToKeyframe(earlyUs, elapsedRealtimeUs, isLastBuffer);
+                        return earlyUs < -500_000;
                     }
 
-                    // 遵循 ExoPlayer 官方标准时钟追平策略 (-30ms)
+                    // 2. 核心：在单帧渲染层积极跳显（落后超过 1 帧 16ms 即跳过显示，死死跟紧音频）
                     @Override
                     protected boolean shouldDropOutputBuffer(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        return super.shouldDropOutputBuffer(earlyUs, elapsedRealtimeUs, isLastBuffer);
+                        // 对于 60fps 视频，每帧间隔仅 16.6ms；落后超过 25ms 立即丢弃当前过期帧直接呈现下一帧
+                        return earlyUs < -25_000;
                     }
 
                     @Override
@@ -453,14 +450,17 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     boolean enableAudioTrackPlaybackParams,
                     boolean enableOffload) {
 
-                // 音频池恒定开放最高 8 声道输入，确保下混处理器顺利将 6 声道 EAC3 转为立体声出声
                 AudioCapabilities pcmCapabilities = new AudioCapabilities(new int[]{C.ENCODING_PCM_16BIT}, 8);
 
                 return new DefaultAudioSink.Builder(context)
                         .setAudioCapabilities(pcmCapabilities)
                         .setEnableFloatOutput(false)
                         .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
-                        .setAudioProcessors(new AudioProcessor[]{new SwitchableDownmixAudioProcessor(context, enableMultiChannel)})
+                        // 注入 150ms 音频延时处理器，强制音频等待电视画质芯片后处理，声画精准咬合
+                        .setAudioProcessors(new AudioProcessor[]{
+                                new AudioDelayOffsetProcessor(150),
+                                new SwitchableDownmixAudioProcessor(context, enableMultiChannel)
+                        })
                         .build();
             }
         };
@@ -897,5 +897,55 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
             return trackSelector.getParameters().tunnelingEnabled;
         }
         return false;
+    }
+    /**
+     * 硬件延时对齐处理器：解决大屏电视画质芯片（MEMC/降噪）带来的画面滞后问题
+     */
+    public static class AudioDelayOffsetProcessor extends BaseAudioProcessor {
+        private final int mDelayMs;
+        private byte[] mDelayBuffer;
+        private int mDelayBytes;
+        private boolean mIsInitialized;
+
+        public AudioDelayOffsetProcessor(int delayMs) {
+            this.mDelayMs = delayMs;
+        }
+
+        @Override
+        public AudioFormat onConfigure(AudioFormat inputAudioFormat) throws UnhandledAudioFormatException {
+            if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT || mDelayMs <= 0) {
+                return AudioFormat.NOT_SET;
+            }
+            // 计算延时对应的静音字节数：延迟毫秒 * 采样率 * 通道数 * 2 字节
+            int bytesPerMs = (inputAudioFormat.sampleRate * inputAudioFormat.channelCount * 2) / 1000;
+            mDelayBytes = mDelayMs * bytesPerMs;
+            mDelayBuffer = new byte[mDelayBytes];
+            mIsInitialized = false;
+            return inputAudioFormat;
+        }
+
+        @Override
+        public void queueInput(ByteBuffer inputBuffer) {
+            int remaining = inputBuffer.remaining();
+            if (remaining == 0) return;
+
+            // 首次起播注入一段静音填充，使声音延迟 mDelayMs 产生，等待电视画质芯片完成帧处理
+            if (!mIsInitialized && mDelayBytes > 0) {
+                ByteBuffer silenceBuffer = replaceOutputBuffer(mDelayBytes + remaining);
+                silenceBuffer.put(mDelayBuffer);
+                silenceBuffer.put(inputBuffer);
+                silenceBuffer.flip();
+                mIsInitialized = true;
+            } else {
+                ByteBuffer output = replaceOutputBuffer(remaining);
+                output.put(inputBuffer);
+                output.flip();
+            }
+        }
+
+        @Override
+        protected void onReset() {
+            mIsInitialized = false;
+        }
     }
 }
