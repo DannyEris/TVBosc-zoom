@@ -103,8 +103,8 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
 
     // 活跃出帧监控心跳
     private volatile long mLastRenderedFrameTimeRealtime = 0;
-    // 实时物理出帧统计 (FPS)
-    private volatile int mRenderedFrameCount = 0;
+    // 实时物理出帧统计 (普通变量即可，消除每帧双倍 volatile 内存屏障开销)
+    private int mRenderedFrameCount = 0;
     private int mLastFpsFrameCount = 0;
     private long mLastFpsCalcTime = 0;
     private volatile float mCurrentRealFps = 0f;
@@ -260,10 +260,11 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
         mStallRescueStep = 0;
 
-        // 4K 60fps 专属大水池配置：大幅提高后台预读水位，彻底消除断续卡顿感
+        // 兼顾 2GB(M19/小米电视4A) 与 3GB(TX9 Pro) 内存：限制缓冲池上限为 48MB，杜绝高码率下 GC 卡顿与 OOM
         mLoadControl = new DefaultLoadControl.Builder()
                 .setBufferDurationsMs(15_000, 50_000, 2_000, 5_000)
-                .setPrioritizeTimeOverSizeThresholds(true)
+                .setTargetBufferBytes(48 * 1024 * 1024)
+                .setPrioritizeTimeOverSizeThresholds(false)
                 .setBackBuffer(0, false)
                 .build();
 
@@ -343,6 +344,9 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         MediaFormat mediaFormat = super.getMediaFormat(
                                 format, codecMimeType, codecMaxValues, codecOperatingRate,
                                 deviceNeedsNoPostProcessWorkaround, tunnelingAudioSessionId);
+
+                        // 扩大单帧输入缓冲至 4MB，防止 4K 高码率大 I 帧在旧版安卓(M19/小米4A)上溢出
+                        mediaFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4 * 1024 * 1024);
 
                         // 适配 S912 (Android 7.1.2) OMX 硬件规范：
                         // 严格限制最高 OperatingRate 为 60.0f，避免超写 120.0f 触发 OMX_ErrorBadParameter 导致提频失效
@@ -867,29 +871,29 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         if (mInternalPlayer == null || !isPlaying()) {
             return 0f;
         }
-        // 1. 如果片源流头标注了静态帧率且大于0，优先参考
-        Format format = mInternalPlayer.getVideoFormat();
-        if (format != null && format.frameRate > 0) {
-            return format.frameRate;
-        }
-
-        // 2. 依据硬件实际送显出帧频率进行测算
+        // 1. 优先依据硬件实际送显出帧频率进行动态测算
         long now = SystemClock.elapsedRealtime();
         if (mLastFpsCalcTime > 0) {
             long duration = now - mLastFpsCalcTime;
-            if (duration >= 800) { // 约每秒计算一次
-                int frames = mRenderedFrameCount - mLastFpsFrameCount;
-                if (frames > 0) {
+            if (duration >= 1000) { // 每满 1 秒更新一次，降低高频计算开销
+                int currentCount = mRenderedFrameCount;
+                int frames = currentCount - mLastFpsFrameCount;
+                if (frames >= 0) {
                     mCurrentRealFps = (frames * 1000f) / duration;
                 }
-                mLastFpsFrameCount = mRenderedFrameCount;
+                mLastFpsFrameCount = currentCount;
                 mLastFpsCalcTime = now;
             }
         } else {
             mLastFpsCalcTime = now;
             mLastFpsFrameCount = mRenderedFrameCount;
         }
-        return mCurrentRealFps;
+        if (mCurrentRealFps > 0f) {
+            return mCurrentRealFps;
+        }
+        // 2. 起播首秒尚未产出统计值时，回退参考流头静态帧率
+        Format format = mInternalPlayer.getVideoFormat();
+        return (format != null && format.frameRate > 0) ? format.frameRate : 0f;
     }
     // 动态调整 ExoPlayer 底层解码器硬件裁切模式
     public void setVideoScalingMode(int videoScalingMode) {
