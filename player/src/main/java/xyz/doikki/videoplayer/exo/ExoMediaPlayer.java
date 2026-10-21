@@ -212,11 +212,14 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
         mWatchdogRunnable = new Runnable() {
             @Override
             public void run() {
-                if (mInternalPlayer != null && isPlaying()) {
+                // 严格限定仅在 STATE_READY 真正播放状态下巡检，防止网络缓冲期(STATE_BUFFERING)误触发 Seek
+                if (mInternalPlayer != null
+                        && mInternalPlayer.getPlaybackState() == Player.STATE_READY
+                        && mInternalPlayer.getPlayWhenReady()) {
                     long now = SystemClock.elapsedRealtime();
-                    // 门槛 1200ms：快速捕捉底层卡顿
+                    // 门槛 1500ms：快速捕捉底层硬件解码器死锁
                     if (mLastRenderedFrameTimeRealtime > 0 
-                            && (now - mLastRenderedFrameTimeRealtime > 1200) 
+                            && (now - mLastRenderedFrameTimeRealtime > 1500) 
                             && getCurrentPosition() > 3000) {
                         
                         long currentPos = getCurrentPosition();
@@ -305,7 +308,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
     }
 
     private RenderersFactory createCustomRenderersFactory(final boolean enableMultiChannel) {
-        return new DefaultRenderersFactory(mAppContext) {
+        DefaultRenderersFactory factory = new DefaultRenderersFactory(mAppContext) {
             @Override
             protected void buildVideoRenderers(
                     Context context,
@@ -317,7 +320,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     long allowedVideoJoiningTimeMs,
                     ArrayList<Renderer> out) {
 
-                writeDebugLog(context, "[buildVideoRenderers] 挂载稳态渲染器与心跳监控...");
+                writeDebugLog(context, "[buildVideoRenderers] 挂载 S912 4K 60fps 专用稳态渲染器...");
 
                 MediaCodecVideoRenderer videoRenderer = new MediaCodecVideoRenderer(
                         context,
@@ -328,7 +331,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         eventListener,
                         50) {
 
-                    
                     @Override
                     @SuppressLint("InlinedApi")
                     protected MediaFormat getMediaFormat(
@@ -342,26 +344,27 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                                 format, codecMimeType, codecMaxValues, codecOperatingRate,
                                 deviceNeedsNoPostProcessWorkaround, tunnelingAudioSessionId);
 
-                        // 扩大输入缓冲至 4MB，容纳 4K 高码率大 I 帧
-                        mediaFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4 * 1024 * 1024);
-
-                        // 算力拉满：强制提升 4K 60fps 芯片解码频率和最高优先级，杜绝底层掉帧
+                        // 适配 S912 (Android 7.1.2) OMX 硬件规范：
+                        // 严格限制最高 OperatingRate 为 60.0f，避免超写 120.0f 触发 OMX_ErrorBadParameter 导致提频失效
                         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-                            mediaFormat.setFloat(MediaFormat.KEY_OPERATING_RATE, 120.0f);
+                            float targetRate = (format != null && format.frameRate > 0)
+                                    ? Math.min(format.frameRate, 60.0f) : 60.0f;
+                            mediaFormat.setFloat(MediaFormat.KEY_OPERATING_RATE, targetRate);
                             mediaFormat.setInteger(MediaFormat.KEY_PRIORITY, 0);
                         }
                         return mediaFormat;
                     }
 
+                    // 将跨关键帧追赶门槛从默认的 500ms (0.5秒) 收紧至 200ms，消除 0.5 秒滞后死区
                     @Override
                     protected boolean shouldDropBuffersToKeyframe(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        return super.shouldDropBuffersToKeyframe(earlyUs, elapsedRealtimeUs, isLastBuffer);
+                        return earlyUs < -200_000 && !isLastBuffer;
                     }
 
-                    // 容差设定为 40ms（允许微小抖动，落后超过 2 帧立即跳显，死死咬住时钟）
+                    // 单帧容差设为 65ms (约 4 帧)：过滤轻微抖动保证 60fps 连贯丝滑，落后超标立即跳显对齐
                     @Override
                     protected boolean shouldDropOutputBuffer(long earlyUs, long elapsedRealtimeUs, boolean isLastBuffer) {
-                        return earlyUs < -40_000;
+                        return earlyUs < -65_000 && !isLastBuffer;
                     }
 
                     @Override
@@ -385,6 +388,16 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         mRenderedFrameCount++;
                         mStallRescueStep = 0;
                         super.renderOutputBuffer(codec, index, presentationTimeUs);
+                    }
+
+                    // 关键补齐：隧道模式下由该回调更新心跳，彻底根除隧道模式下看门狗误触发 Seek 循环！
+                    @Override
+                    protected void onProcessedTunneledBuffer(long presentationTimeUs)
+                            throws com.google.android.exoplayer2.ExoPlaybackException {
+                        mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
+                        mRenderedFrameCount++;
+                        mStallRescueStep = 0;
+                        super.onProcessedTunneledBuffer(presentationTimeUs);
                     }
                 };
 
@@ -457,6 +470,15 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                         .build();
             }
         };
+        factory.setEnableDecoderFallback(true);
+        factory.setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON);
+        try {
+            Method method = DefaultRenderersFactory.class.getMethod("forceDisableMediaCodecAsynchronousQueueing");
+            method.invoke(factory);
+            writeDebugLog(mAppContext, "[渲染工厂] 已关闭异步 MediaCodec 队列，适配 S912 Android 7.1.2");
+        } catch (Throwable ignored) {
+        }
+        return factory;
     }
 
     private void checkFfmpegExtensionStatus() {
@@ -675,6 +697,7 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 mPlayerEventListener.onInfo(MEDIA_INFO_BUFFERING_START, getBufferedPercentage());
                 break;
             case Player.STATE_READY:
+                mLastRenderedFrameTimeRealtime = SystemClock.elapsedRealtime();
                 mPlayerEventListener.onInfo(MEDIA_INFO_BUFFERING_END, getBufferedPercentage());
                 break;
             case Player.STATE_ENDED:
