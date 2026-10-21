@@ -839,7 +839,7 @@ public class DetailActivity extends BaseActivity {
         llPlayerFragmentContainer.setClipToOutline(true);
         llPlayerFragmentContainer.setOutlineProvider(provider);
         llPlayerFragmentContainerBlock.setClipToOutline(true);
-        llPlayerFragmentContainerBlock.setClipToOutline(provider);
+        llPlayerFragmentContainerBlock.setOutlineProvider(provider);
         if (thumbContainer != null) {
             thumbContainer.setClipToOutline(true);
             thumbContainer.setOutlineProvider(provider);
@@ -885,7 +885,6 @@ public class DetailActivity extends BaseActivity {
             thumbContainer.setBackgroundResource(R.drawable.shape_detail_thumb_idle_bg);
         }
     }
-3. 修正起播切
 
     private void setPreviewRoundClip(boolean enable) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
