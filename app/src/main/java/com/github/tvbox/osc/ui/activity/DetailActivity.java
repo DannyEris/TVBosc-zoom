@@ -103,6 +103,7 @@ public class DetailActivity extends BaseActivity {
     private PlayFragment playFragment = null;
     private View thumbContainer;
     private ImageView ivThumb;
+    private ImageView ivPreviewCover;
     private TextView tvName;
     private TextView tvYear;
     private TextView tvSite;
@@ -185,6 +186,7 @@ public class DetailActivity extends BaseActivity {
         applyPreviewRoundCorners();
         thumbContainer = findViewById(R.id.thumbContainer);
         ivThumb = findViewById(R.id.ivThumb);
+        ivPreviewCover = findViewById(R.id.previewPlayerCover); // 绑定新增封面
         applyThumbPreviewStyle();
         tvName = findViewById(R.id.tvName);
         tvYear = findViewById(R.id.tvYear);
@@ -654,8 +656,7 @@ public class DetailActivity extends BaseActivity {
 //            bundle.putSerializable("VodInfo", vodInfo);
             App.getInstance().setVodInfo(vodInfo);
             if (showPreview) {
-                if (thumbContainer != null) thumbContainer.setVisibility(View.GONE);
-                if (llPlayerPlace != null) llPlayerPlace.setVisibility(View.VISIBLE);
+                if (ivPreviewCover != null) ivPreviewCover.setVisibility(View.GONE);
                 if (llPlayerFragmentContainer != null) llPlayerFragmentContainer.setVisibility(View.VISIBLE);
                 ensurePlayFragment();
                 updatePreviewVodInfo();
@@ -840,57 +841,30 @@ public class DetailActivity extends BaseActivity {
         llPlayerFragmentContainer.setOutlineProvider(provider);
         llPlayerFragmentContainerBlock.setClipToOutline(true);
         llPlayerFragmentContainerBlock.setOutlineProvider(provider);
-        if (thumbContainer != null) {
-            thumbContainer.setClipToOutline(true);
-            thumbContainer.setOutlineProvider(provider);
+        if (ivPreviewCover != null) {
+            ivPreviewCover.setClipToOutline(true);
+            ivPreviewCover.setOutlineProvider(provider);
         }
     }
 
     private void applyThumbPreviewStyle() {
         if (showPreview) {
-            // 核心保障：llPlayerPlace 全程保持显示，锁定 16:9 布局基准，杜绝页面跳动
-            if (llPlayerPlace != null) {
-                llPlayerPlace.setVisibility(View.VISIBLE);
-                // 让封面容器与播放器小窗占位尺寸 1:1 绝对强绑定
-                if (thumbContainer != null) {
-                    ViewGroup.LayoutParams placeParams = llPlayerPlace.getLayoutParams();
-                    if (placeParams != null) {
-                        ViewGroup.LayoutParams thumbParams = thumbContainer.getLayoutParams();
-                        if (thumbParams != null) {
-                            thumbParams.width = placeParams.width;
-                            thumbParams.height = placeParams.height;
-                            thumbContainer.setLayoutParams(thumbParams);
-                        }
-                    }
-                }
-            }
+            // 核心保障：锁定起播后的 16:9 基准布局，topLayout 内部排版恒定不变
+            if (thumbContainer != null) thumbContainer.setVisibility(View.GONE);
+            if (llPlayerPlace != null) llPlayerPlace.setVisibility(View.VISIBLE);
+            if (ivThumb != null) ivThumb.setVisibility(View.GONE);
 
-            if (ivThumb != null) {
-                ViewGroup.LayoutParams ivParams = ivThumb.getLayoutParams();
-                if (ivParams != null) {
-                    ivParams.width = ViewGroup.LayoutParams.MATCH_PARENT;
-                    ivParams.height = ViewGroup.LayoutParams.MATCH_PARENT;
-                    ivThumb.setLayoutParams(ivParams);
-                }
-                ivThumb.setScaleType(ImageView.ScaleType.FIT_CENTER); // 封面自适应居中嵌入 16:9 窗口
-            }
-
-            if (thumbContainer != null) {
-                thumbContainer.setBackgroundColor(Color.BLACK);
-            }
-            applyPreviewRoundCorners();
-
-            // 无论 detailAutoPlay 是否开启，初始状态只由封面负责遮罩，不改变占位大小
+            // 依据“自动播放”控制静态封面与播放器显隐
             boolean showCover = !detailAutoPlay && (previewVodInfo == null);
-            if (thumbContainer != null) thumbContainer.setVisibility(showCover ? View.VISIBLE : View.GONE);
-            if (ivThumb != null) ivThumb.setVisibility(showCover ? View.VISIBLE : View.GONE);
-            if (llPlayerFragmentContainer != null) {
-                llPlayerFragmentContainer.setVisibility(showCover ? View.INVISIBLE : View.VISIBLE);
-            }
+            if (ivPreviewCover != null) ivPreviewCover.setVisibility(showCover ? View.VISIBLE : View.GONE);
+            if (llPlayerFragmentContainer != null) llPlayerFragmentContainer.setVisibility(showCover ? View.INVISIBLE : View.VISIBLE);
+            if (llPlayerFragmentContainerBlock != null) llPlayerFragmentContainerBlock.setVisibility(View.VISIBLE);
         } else {
+            // 原生关闭窗口预览模式
             if (thumbContainer != null) thumbContainer.setVisibility(View.VISIBLE);
             if (llPlayerPlace != null) llPlayerPlace.setVisibility(View.GONE);
             if (ivThumb != null) ivThumb.setVisibility(View.VISIBLE);
+            if (ivPreviewCover != null) ivPreviewCover.setVisibility(View.GONE);
             if (thumbContainer != null) thumbContainer.setBackgroundResource(R.drawable.shape_detail_thumb_idle_bg);
         }
     }
@@ -967,9 +941,16 @@ public class DetailActivity extends BaseActivity {
                     setTextShow(tvDirector, "导演：", removeHtmlTag(mVideo.director));
                     setTextShow(tvDes, "内容简介：", removeHtmlTag(mVideo.des));
                     if (!TextUtils.isEmpty(mVideo.pic)) {
-                        com.github.tvbox.osc.util.ImgUtil.load(DefaultConfig.checkReplaceProxy(mVideo.pic), ivThumb, AutoSizeUtils.mm2px(mContext, 10), AutoSizeUtils.mm2px(mContext, 300), AutoSizeUtils.mm2px(mContext, 400), mVideo.name);
+                        String picUrl = DefaultConfig.checkReplaceProxy(mVideo.pic);
+                        com.github.tvbox.osc.util.ImgUtil.load(picUrl, ivThumb, AutoSizeUtils.mm2px(mContext, 10), AutoSizeUtils.mm2px(mContext, 300), AutoSizeUtils.mm2px(mContext, 400), mVideo.name);
+                        if (ivPreviewCover != null) {
+                            com.github.tvbox.osc.util.ImgUtil.load(picUrl, ivPreviewCover, AutoSizeUtils.mm2px(mContext, 10), AutoSizeUtils.mm2px(mContext, 470), AutoSizeUtils.mm2px(mContext, 300), mVideo.name);
+                        }
                     } else {
                         ivThumb.setImageDrawable(com.github.tvbox.osc.util.ImgUtil.createTextDrawable(mVideo.name));
+                        if (ivPreviewCover != null) {
+                            ivPreviewCover.setImageDrawable(com.github.tvbox.osc.util.ImgUtil.createTextDrawable(mVideo.name));
+                        }
                     }
 
                     if (vodInfo.seriesMap != null && vodInfo.seriesMap.size() > 0) {
@@ -1024,10 +1005,8 @@ public class DetailActivity extends BaseActivity {
                             if (detailAutoPlay) {
                                 jumpToPlay();
                             } else {
-                                // 关自动播放：封面置顶，保持 16:9 占位坚决不隐藏，不调用 jumpToPlay 取流
-                                if (thumbContainer != null) thumbContainer.setVisibility(View.VISIBLE);
-                                if (ivThumb != null) ivThumb.setVisibility(View.VISIBLE);
-                                if (llPlayerPlace != null) llPlayerPlace.setVisibility(View.VISIBLE);
+                                // 自动播放关闭：维持封面静止展示，右侧详情与按钮保持不动
+                                if (ivPreviewCover != null) ivPreviewCover.setVisibility(View.VISIBLE);
                                 if (llPlayerFragmentContainer != null) llPlayerFragmentContainer.setVisibility(View.INVISIBLE);
                             }
                             llPlayerFragmentContainerBlock.setVisibility(View.VISIBLE);
