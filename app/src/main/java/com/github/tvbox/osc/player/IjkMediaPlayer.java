@@ -36,6 +36,13 @@ public class IjkMediaPlayer extends IjkPlayer {
     private static final String DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
     private static final String DEFAULT_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/json;q=0.9";
 
+    // IJK 硬件防死锁自愈哨兵变量
+    private android.os.Handler mIjkWatchdogHandler;
+    private Runnable mIjkWatchdogRunnable;
+    private long mLastIjkPos = 0;
+    private long mLastIjkAdvanceTime = 0;
+    private int mIjkStallStep = 0;
+
     public IjkMediaPlayer(Context context, IJKCode codec) {
         super(context);
         this.codec = codec;
@@ -62,31 +69,52 @@ public class IjkMediaPlayer extends IjkPlayer {
                 }
             }
         }
-        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "max-fps", 30);
 
-        // 设置视频流格式
-//        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "overlay-format", tv.danmaku.ijk.media.player.IjkMediaPlayer.SDL_FCC_RV32);
+        // ================= 核心修复：解除 30fps 封印，释放 60fps 满血帧率 =================
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "max-fps", 60);
 
-        //开启内置字幕
+        // ================= 晶晨 S912/S912H/小米电视 4A 专属硬件对齐参数 =================
+        // 1. 规避晶晨芯片时间戳死锁（核心：禁用 IJK 内部的 MediaCodec 同步封装，由音频主时钟弹性追赶）
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "mediacodec-sync", 0);
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "mediacodec-auto-rotate", 0);
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "mediacodec-handle-resolution-change", 1);
+        
+        // 2. 启用平滑跳显：画面落后音频超过阈值时轻度跳帧，死死咬合音画同步
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "framedrop", 5);
+
+        // 3. 声卡保护：强制使用 Android 标准 AudioTrack 输出，禁用 OpenSL ES (防止天猫魔盒 M19 无声或报错)
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "opensles", 0);
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "soundtouch", 0);
+
+        // 4. 内存保护：限制缓冲队列最大占用为 40MB，杜绝 2GB 内存设备(M19/小米4A)发生 OOM 与频繁 GC 顿挫
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "max-buffer-size", 40 * 1024 * 1024);
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "packet-buffering", 1);
+
+        // 开启内置字幕与网络基础优化
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "subtitle", 1);
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "dns_cache_clear", 1);
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "dns_cache_timeout", -1);
-        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT,"safe",0);
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "safe", 0);
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "reconnect", 1);
 
-        if(Hawk.get(HawkConfig.PLAYER_IS_LIVE, false)){
+        if (Hawk.get(HawkConfig.PLAYER_IS_LIVE, false)) {
             LOG.i("echo-type-直播");
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "max_cached_duration", 300);
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "flush_packets", 1);
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "min-frames", 1);
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_CODEC, "threads", "1");
-        }else{
+        } else {
             LOG.i("echo-type-点播");
-            // 降低延迟
+            // 针对百度网盘等高码率流：探测时长设为 1 秒、首包探测大小设为 1MB，大幅缩短起播白屏时间
+            mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "analyzeduration", 1000000);
+            mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "probesize", 1024 * 1024);
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "max_cached_duration", 3000);
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "infbuf", 0);
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_CODEC, "threads", "2");
         }
-//        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "sync-av-start", 1);//强制音画同步
+
+        // 启动/重置自愈哨兵
+        initIjkWatchdog();
     }
 
     private static final String ITV_TARGET_DOMAIN = "gslbserv.itv.cmvideo.cn";
@@ -382,5 +410,74 @@ public class IjkMediaPlayer extends IjkPlayer {
             };
             setTrack(trackIndex);
         }
+    }
+    // ================= 自愈哨兵机制 (与 Exo 协同双重保险) =================
+    private void initIjkWatchdog() {
+        if (mIjkWatchdogHandler == null) {
+            mIjkWatchdogHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+        } else {
+            mIjkWatchdogHandler.removeCallbacksAndMessages(null);
+        }
+        mLastIjkPos = 0;
+        mLastIjkAdvanceTime = android.os.SystemClock.elapsedRealtime();
+        mIjkStallStep = 0;
+
+        mIjkWatchdogRunnable = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (mMediaPlayer != null && isPlaying()) {
+                        long currentPos = getCurrentPosition();
+                        long now = android.os.SystemClock.elapsedRealtime();
+
+                        // 正常推进，重置基准时间
+                        if (currentPos != mLastIjkPos) {
+                            mLastIjkPos = currentPos;
+                            mLastIjkAdvanceTime = now;
+                            mIjkStallStep = 0;
+                        } else if (currentPos > 3000) {
+                            // 进度超过 1500ms 纹丝不动，判定为硬件解码器死锁
+                            if (mLastIjkAdvanceTime > 0 && (now - mLastIjkAdvanceTime > 1500)) {
+                                long duration = getDuration();
+                                if (mIjkStallStep == 0) {
+                                    LOG.i("[IJK自愈哨兵] 检测到硬件停滞，执行温和【原地 Flush】显存自愈！");
+                                    mIjkStallStep = 1;
+                                    mLastIjkAdvanceTime = now - 600; // 给 600ms 恢复期
+                                    seekTo(currentPos);
+                                } else {
+                                    long targetPos = (duration > 0) ? Math.min(currentPos + 3500, duration) : currentPos + 3500;
+                                    LOG.i("[IJK自愈哨兵] 原地 Flush 后仍受阻，执行【跨 GOP 快进 3.5 秒】脱困！目标: " + targetPos);
+                                    mIjkStallStep = 0;
+                                    mLastIjkAdvanceTime = now + 2500;
+                                    seekTo(targetPos);
+                                }
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+                if (mIjkWatchdogHandler != null) {
+                    mIjkWatchdogHandler.postDelayed(this, 400); // 400ms 高频巡检
+                }
+            }
+        };
+        mIjkWatchdogHandler.postDelayed(mIjkWatchdogRunnable, 1500);
+    }
+
+    @Override
+    public void release() {
+        if (mIjkWatchdogHandler != null) {
+            mIjkWatchdogHandler.removeCallbacksAndMessages(null);
+            mIjkWatchdogHandler = null;
+        }
+        super.release();
+    }
+
+    @Override
+    public void reset() {
+        if (mIjkWatchdogHandler != null) {
+            mIjkWatchdogHandler.removeCallbacksAndMessages(null);
+        }
+        super.reset();
     }
 }
