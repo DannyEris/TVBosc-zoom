@@ -35,6 +35,7 @@ import com.github.tvbox.osc.R;
 import com.github.tvbox.osc.api.ApiConfig;
 import com.github.tvbox.osc.base.App;
 import com.github.tvbox.osc.bean.IJKCode;
+import com.github.tvbox.osc.player.IjkMediaPlayer;
 import com.github.tvbox.osc.bean.ParseBean;
 import com.github.tvbox.osc.bean.SourceBean;
 import com.github.tvbox.osc.server.ControlManager;
@@ -2396,20 +2397,46 @@ public class VodController extends BaseController {
                     else if (Math.abs(realFps - 60) < 1.8f) roundFps = 60;
                     fpsStr = roundFps + " FPS";
                 }
-            } else if (player != null) {
-                // IJK 播放器提取分支
+            } else if (player instanceof IjkMediaPlayer) {
+                // IJK 播放器直连提取分支
+                IjkMediaPlayer ijkPlayer = (IjkMediaPlayer) player;
+
+                // 1. 获取物理出帧/元数据帧率 (直连 getRealFps)
+                float realFps = ijkPlayer.getRealFps();
+                if (realFps >= 10f && realFps <= 144f) {
+                    int roundFps = Math.round(realFps);
+                    if (Math.abs(realFps - 24) < 1.2f) roundFps = 24;
+                    else if (Math.abs(realFps - 25) < 1.0f) roundFps = 25;
+                    else if (Math.abs(realFps - 30) < 1.2f) roundFps = 30;
+                    else if (Math.abs(realFps - 50) < 1.5f) roundFps = 50;
+                    else if (Math.abs(realFps - 60) < 1.8f) roundFps = 60;
+                    fpsStr = roundFps + " FPS";
+                }
+
+                // 2. 码率解析 (优先元数据，兜底由当前网络吞吐换算)
+                long bitrate = 0;
                 try {
-                    java.lang.reflect.Method fpsMethod = player.getClass().getMethod("getVideoOutputFramesPerSecond");
-                    float fps = (Float) fpsMethod.invoke(player);
-                    if (fps > 0) {
-                        fpsStr = Math.round(fps) + " FPS";
-                    }
+                    bitrate = ijkPlayer.getBitRate();
                 } catch (Throwable ignored) {}
+                if (bitrate <= 0) {
+                    long tcpSpeed = ijkPlayer.getTcpSpeed();
+                    if (tcpSpeed > 0) {
+                        bitrate = tcpSpeed * 8; // Byte/s 转 bps
+                    }
+                }
+                if (bitrate > 0) {
+                    bitrateStr = String.format(Locale.US, "%.1f Mbps", bitrate / 1000000.0f);
+                }
+
+                // 3. 色彩格式解析
+                formatStr = parseIjkColorFormat(ijkPlayer);
+            } else if (player != null) {
+                // 通用反射兜底分支
                 try {
-                    java.lang.reflect.Method brMethod = player.getClass().getMethod("getBitRate");
-                    long br = (Long) brMethod.invoke(player);
-                    if (br > 0) {
-                        bitrateStr = String.format(Locale.US, "%.1f Mbps", br / 1000000.0f);
+                    java.lang.reflect.Method fpsMethod = player.getClass().getMethod("getRealFps");
+                    float fps = (Float) fpsMethod.invoke(player);
+                    if (fps >= 10f && fps <= 144f) {
+                        fpsStr = Math.round(fps) + " FPS";
                     }
                 } catch (Throwable ignored) {}
                 formatStr = parseIjkColorFormat(player);
