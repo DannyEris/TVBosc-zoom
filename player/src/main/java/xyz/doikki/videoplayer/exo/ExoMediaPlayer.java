@@ -724,6 +724,12 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED) {
 
+            // 兼容安卓 5.1 (API 22) 天猫魔盒等老旧盒子：FFmpeg 软解 EAC3 切换失败时，强制关闭多声道并重试
+            if (android.os.Build.VERSION.SDK_INT < 23 && isMultiChannelModeEnabled(mAppContext)) {
+                writeDebugLog(mAppContext, "[低版本声卡适配] 检测到 API < 23 音频管道受阻，强制切入 2.0 立体声下混");
+                setMultiChannelModeEnabled(mAppContext, false);
+            }
+
             if (isMultiChannelModeEnabled(mAppContext)) {
                 writeDebugLog(mAppContext, "[声卡保护] 自动降级为电视立体声模式");
                 setMultiChannelModeEnabled(mAppContext, false);
