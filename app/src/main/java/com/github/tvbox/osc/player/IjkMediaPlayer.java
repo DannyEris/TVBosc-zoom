@@ -47,6 +47,8 @@ public class IjkMediaPlayer extends IjkPlayer {
     @Override
     public void start() {
         mIsUserPaused = false;
+        mLastIjkAdvanceTime = android.os.SystemClock.elapsedRealtime(); // 唤醒时重置基准时钟，防止暂停恢复后误触发自愈
+        mIjkStallStep = 0;
         super.start();
     }
 
