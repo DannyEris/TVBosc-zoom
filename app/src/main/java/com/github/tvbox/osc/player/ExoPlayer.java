@@ -159,7 +159,20 @@ public class ExoPlayer extends ExoMediaPlayer {
 
     public void setTrack(int groupIndex, int trackIndex, String playKey) {
         MappingTrackSelector.MappedTrackInfo mappedInfo = trackSelector.getCurrentMappedTrackInfo();
-        setTrack(findAudioRendererIndex(mappedInfo), groupIndex, trackIndex, playKey);
+        setTrack(findAudioRendererIndexForGroup(mappedInfo, groupIndex), groupIndex, trackIndex, playKey);
+    }
+
+    private int findAudioRendererIndexForGroup(MappingTrackSelector.MappedTrackInfo mappedInfo, int groupIndex) {
+        if (mappedInfo == null) return C.INDEX_UNSET;
+        for (int i = 0; i < mappedInfo.getRendererCount(); i++) {
+            if (mappedInfo.getRendererType(i) == C.TRACK_TYPE_AUDIO) {
+                TrackGroupArray groups = mappedInfo.getTrackGroups(i);
+                if (groupIndex >= 0 && groupIndex < groups.length) {
+                    return i;
+                }
+            }
+        }
+        return findAudioRendererIndex(mappedInfo);
     }
 
     public void setTrack(TrackInfoBean track, String playKey) {
@@ -191,6 +204,14 @@ public class ExoPlayer extends ExoMediaPlayer {
             // 音频渲染器互斥激活机制：
             // 选中的音频渲染器放行并下发 override，另一个音频渲染器彻底禁用，释放 AudioSink 独占权
             if (mappedInfo.getRendererType(rendererIndex) == C.TRACK_TYPE_AUDIO) {
+                // 动态获取硬件音频渲染器(第一顺位)的实际索引
+                int hardwareAudioIndex = findAudioRendererIndex(mappedInfo);
+                boolean isHardwareAudio = (rendererIndex == hardwareAudioIndex);
+                boolean globalTunnel = com.orhanobut.hawk.Hawk.get(com.github.tvbox.osc.util.HawkConfig.TUNNEL_MODE, false);
+
+                // 仅当硬件音频与用户开启隧道同时满足时启用隧道；切软解时自动平滑释放
+                builder.setTunnelingEnabled(isHardwareAudio && globalTunnel);
+
                 for (int i = 0; i < mappedInfo.getRendererCount(); i++) {
                     if (mappedInfo.getRendererType(i) == C.TRACK_TYPE_AUDIO) {
                         if (i == rendererIndex) {
