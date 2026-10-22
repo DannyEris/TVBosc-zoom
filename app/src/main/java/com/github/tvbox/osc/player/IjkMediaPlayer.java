@@ -37,11 +37,11 @@ public class IjkMediaPlayer extends IjkPlayer {
     private static final String DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
     private static final String DEFAULT_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/json;q=0.9";
 
-    // IJK 硬件防死锁自愈哨兵
+    // 强化版硬核自愈哨兵变量
     private android.os.Handler mIjkWatchdogHandler;
     private Runnable mIjkWatchdogRunnable;
-    private long mLastIjkPos = 0;
-    private long mLastIjkAdvanceTime = 0;
+    private long mLastActiveTime = 0;
+    private long mLastCachedBytes = -1;
     private int mIjkStallStep = 0;
     private boolean mIsUserPaused = false;
 
@@ -54,7 +54,8 @@ public class IjkMediaPlayer extends IjkPlayer {
     @Override
     public void start() {
         mIsUserPaused = false;
-        mLastIjkAdvanceTime = android.os.SystemClock.elapsedRealtime();
+        mLastActiveTime = android.os.SystemClock.elapsedRealtime();
+        mLastCachedBytes = -1;
         super.start();
     }
 
@@ -88,24 +89,20 @@ public class IjkMediaPlayer extends IjkPlayer {
         // 1. 解除帧率限制至 60fps
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "max-fps", 60);
 
-        // 2. 晶晨 MediaCodec 硬解防崩专属参数 (核心根治 vdec.status: 200003f)
+        // 2. 晶晨 MediaCodec 硬解防死锁核心参数
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "mediacodec-sync", 0);
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "mediacodec-auto-rotate", 0);
-        // 关键：禁用硬解动态分辨率变更（旧版晶晨驱动遇此必崩 200003f）
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "mediacodec-handle-resolution-change", 0);
-        // 关键：硬解模式下坚决禁用 framedrop，严禁喂送残损 NALU 打崩 Ave-10 硬件
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "framedrop", 0);
 
-        // 3. 声卡保护：强制使用 Android 标准 AudioTrack 输出，禁用 OpenSL ES
+        // 3. 声卡保护：Android 标准 AudioTrack 输出
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "opensles", 0);
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "soundtouch", 0);
 
-        // 4. 水位控制：消除 0ms 假复苏，杜绝 AudioTrack 发生 Underrun
+        // 4. 水位控制：消除 2ms 假复苏，杜绝晶晨解码器欠载死锁
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "packet-buffering", 1);
-        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "max-buffer-size", 40 * 1024 * 1024); // 40MB
-        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "min-frames", 30); // 积攒 30 帧才放行
-        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "first-high-water-mark-ms", 1200); // 首次缓冲积攒 1.2 秒
-        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "next-high-water-mark-ms", 2500);  // 再次缓冲积攒 2.5 秒
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "max-buffer-size", 40 * 1024 * 1024);
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "min-frames", 60); // 至少蓄满 60 帧再出显
 
         // 5. 基础网络与字幕参数
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "subtitle", 1);
@@ -117,7 +114,6 @@ public class IjkMediaPlayer extends IjkPlayer {
         if (Hawk.get(HawkConfig.PLAYER_IS_LIVE, false)) {
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "max_cached_duration", 300);
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "flush_packets", 1);
-            mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "min-frames", 1);
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_CODEC, "threads", "1");
         } else {
             // 点播高码率专属网络参数
@@ -125,19 +121,31 @@ public class IjkMediaPlayer extends IjkPlayer {
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "probesize", 1024 * 1024);
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "max_cached_duration", 15000);
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "infbuf", 0);
-            mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "timeout", 10000000); // 10秒超时重试
+            mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "timeout", 10000000);
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_CODEC, "threads", "2");
         }
 
         initIjkWatchdog();
     }
 
-    // 补齐右上角真实物理帧率获取接口
+    // 补齐右上角真实物理帧率获取接口（支持硬解元数据保底提取）
     public float getRealFps() {
         if (mMediaPlayer != null) {
             float vfps = mMediaPlayer.getVideoOutputFramesPerSecond();
             if (vfps > 0) return vfps;
-            return mMediaPlayer.getVideoDecodeFramesPerSecond();
+            float dfps = mMediaPlayer.getVideoDecodeFramesPerSecond();
+            if (dfps > 0) return dfps;
+            try {
+                tv.danmaku.ijk.media.player.MediaInfo mi = mMediaPlayer.getMediaInfo();
+                if (mi != null && mi.mMeta != null) {
+                    int fpsNum = mi.mMeta.getInt(IjkMediaMeta.IJKM_KEY_FPS_NUM);
+                    int fpsDen = mi.mMeta.getInt(IjkMediaMeta.IJKM_KEY_FPS_DEN);
+                    if (fpsDen > 0 && fpsNum > 0) {
+                        return (float) fpsNum / fpsDen;
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
         }
         return 0f;
     }
@@ -395,45 +403,48 @@ public class IjkMediaPlayer extends IjkPlayer {
         }
     }
 
-    // ================= 核心自愈哨兵：基于物理位移纯逻辑判定 =================
+    // ================= 终极哨兵：基于硬件消费与网络吞吐的双重判定 =================
     private void initIjkWatchdog() {
         if (mIjkWatchdogHandler == null) {
             mIjkWatchdogHandler = new android.os.Handler(android.os.Looper.getMainLooper());
         } else {
             mIjkWatchdogHandler.removeCallbacksAndMessages(null);
         }
-        mLastIjkPos = 0;
-        mLastIjkAdvanceTime = android.os.SystemClock.elapsedRealtime();
+        mLastActiveTime = android.os.SystemClock.elapsedRealtime();
+        mLastCachedBytes = -1;
         mIjkStallStep = 0;
 
         mIjkWatchdogRunnable = new Runnable() {
             @Override
             public void run() {
                 try {
-                    // 只要用户没有主动按暂停，处于播放态就必须全程巡检
                     if (mMediaPlayer != null && !mIsUserPaused) {
-                        long currentPos = getCurrentPosition();
                         long now = android.os.SystemClock.elapsedRealtime();
+                        long currentPos = getCurrentPosition();
+                        long tcpSpeed = getTcpSpeed();
+                        long cachedBytes = mMediaPlayer.getVideoCachedBytes();
 
-                        // 核心：若进度推进超过 80ms，说明解码与出声完全正常，重置时间戳
-                        if (Math.abs(currentPos - mLastIjkPos) >= 80) {
-                            mLastIjkPos = currentPos;
-                            mLastIjkAdvanceTime = now;
+                        // 正常播放特征：网络有吞吐数据，或者底层显存队列有进出消耗
+                        boolean isActivelyDecoding = (tcpSpeed > 0) || (mLastCachedBytes != -1 && cachedBytes != mLastCachedBytes);
+
+                        if (isActivelyDecoding) {
+                            mLastActiveTime = now;
+                            mLastCachedBytes = cachedBytes;
                             mIjkStallStep = 0;
                         } else if (currentPos > 3000) {
-                            // 只要物理进度位移停顿持续超过 1800ms，坚决判定为死锁，不管底层伪报什么状态！
-                            if (mLastIjkAdvanceTime > 0 && (now - mLastIjkAdvanceTime > 1800)) {
+                            // 核心触发：当网络吞吐彻底归零，且显存数据连续 1800ms 纹丝不动（解码器死锁拒收）
+                            if (mLastActiveTime > 0 && (now - mLastActiveTime > 1800)) {
                                 long duration = getDuration();
                                 if (mIjkStallStep == 0) {
-                                    Log.e(TAG, "[IJK自愈哨兵] 捕获音画定格！当前进度: " + currentPos + "ms 停滞超 1.8 秒，执行【原地 Flush 重连】！");
+                                    Log.e(TAG, "[IJK自愈哨兵] 捕获硬件锁死(200003f)与网络断流！执行【原地 Flush】重置硬件！当前点: " + currentPos);
                                     mIjkStallStep = 1;
-                                    mLastIjkAdvanceTime = now - 500;
-                                    seekTo(currentPos); // 强制底层调用 flush 重置 Ave-10 硬件解码器
+                                    mLastActiveTime = now - 600;
+                                    seekTo(currentPos); // 强制底层下发 flush 清空错误状态
                                 } else {
                                     long targetPos = (duration > 0) ? Math.min(currentPos + 3500, duration) : currentPos + 3500;
-                                    Log.e(TAG, "[IJK自愈哨兵] 原地 Flush 后仍受阻，执行【跨 GOP 快进 3.5 秒】脱困！目标: " + targetPos);
+                                    Log.e(TAG, "[IJK自愈哨兵] 原地 Flush 未脱困，执行【快进 3.5 秒跳过坏块】！目标: " + targetPos);
                                     mIjkStallStep = 0;
-                                    mLastIjkAdvanceTime = now + 2500;
+                                    mLastActiveTime = now + 2500;
                                     seekTo(targetPos);
                                 }
                             }
