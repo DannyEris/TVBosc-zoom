@@ -439,9 +439,24 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                     }
                 };
 
-                // 1. 第一顺位：智能硬件音频渲染器 (AAC/MP3 硬解直通，完美激活真·隧道模式 HW-Sync，声画绝对同步)
+                // 1. 第一顺位：智能硬件音频渲染器 (彻底封死 EAC3/AC3/DTS 的伪透传 Bypass，确保回落到 FFmpeg 软解)
                 out.add(new MediaCodecAudioRenderer(
-                        context, smartAudioCodecSelector, enableDecoderFallback, eventHandler, eventListener, audioSink));
+                        context, smartAudioCodecSelector, enableDecoderFallback, eventHandler, eventListener, audioSink) {
+                    @Override
+                    protected int supportsFormat(MediaCodecSelector mediaCodecSelector, Format format)
+                            throws com.google.android.exoplayer2.mediacodec.MediaCodecUtil.DecoderQueryException {
+                        String mimeType = format.sampleMimeType;
+                        if (com.google.android.exoplayer2.util.MimeTypes.AUDIO_E_AC3.equalsIgnoreCase(mimeType)
+                                || com.google.android.exoplayer2.util.MimeTypes.AUDIO_AC3.equalsIgnoreCase(mimeType)
+                                || com.google.android.exoplayer2.util.MimeTypes.AUDIO_DTS.equalsIgnoreCase(mimeType)
+                                || com.google.android.exoplayer2.util.MimeTypes.AUDIO_DTS_HD.equalsIgnoreCase(mimeType)
+                                || com.google.android.exoplayer2.util.MimeTypes.AUDIO_TRUEHD.equalsIgnoreCase(mimeType)) {
+                            // 强制返回不支持，阻止 bypassRender 盲目透传 0xa000000 导致声卡报错 -22
+                            return com.google.android.exoplayer2.RendererCapabilities.create(C.FORMAT_UNSUPPORTED_SUBTYPE);
+                        }
+                        return super.supportsFormat(mediaCodecSelector, format);
+                    }
+                });
 
                 // 2. 第二顺位：FFmpeg 软解保底 (EAC3 6声道、DTS 自动在此出声，百分之百不静音)
                 try {
@@ -723,12 +738,6 @@ public class ExoMediaPlayer extends AbstractPlayer implements Player.Listener {
                 || error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED
                 || error.errorCode == PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED) {
-
-            // 兼容安卓 5.1 (API 22) 天猫魔盒等老旧盒子：FFmpeg 软解 EAC3 切换失败时，强制关闭多声道并重试
-            if (android.os.Build.VERSION.SDK_INT < 23 && isMultiChannelModeEnabled(mAppContext)) {
-                writeDebugLog(mAppContext, "[低版本声卡适配] 检测到 API < 23 音频管道受阻，强制切入 2.0 立体声下混");
-                setMultiChannelModeEnabled(mAppContext, false);
-            }
 
             if (isMultiChannelModeEnabled(mAppContext)) {
                 writeDebugLog(mAppContext, "[声卡保护] 自动降级为电视立体声模式");
