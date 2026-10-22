@@ -150,6 +150,16 @@ public class IjkMediaPlayer extends IjkPlayer {
         return 0f;
     }
 
+    // 供控制层提取媒体元数据 (HDR/HLG 色彩信息)
+    public tv.danmaku.ijk.media.player.MediaInfo getMediaInfo() {
+        return mMediaPlayer != null ? mMediaPlayer.getMediaInfo() : null;
+    }
+
+    // 供控制层提取底层码率
+    public long getBitRate() {
+        return mMediaPlayer != null ? mMediaPlayer.getBitRate() : 0;
+    }
+
     private static final String ITV_TARGET_DOMAIN = "gslbserv.itv.cmvideo.cn";
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
