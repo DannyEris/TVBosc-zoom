@@ -99,10 +99,13 @@ public class IjkMediaPlayer extends IjkPlayer {
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "opensles", 0);
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "soundtouch", 0);
 
-        // 4. 水位控制：消除 2ms 假复苏，杜绝晶晨解码器欠载死锁
+        // 4. 水位控制：扩充显存缓冲池至 64MB，并加入再次缓冲高水位门槛
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "packet-buffering", 1);
-        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "max-buffer-size", 40 * 1024 * 1024);
-        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "min-frames", 60); // 至少蓄满 60 帧再出显
+        // 小米电视 4A 拥有 2GB 物理内存，给 18Mbps 高码流分配 64MB 原生缓冲完全安全，可存储约 28 秒画面
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "max-buffer-size", 64 * 1024 * 1024);
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "min-frames", 60);
+        // 核心参数：当网络波动导致缓冲耗尽时，强制至少积攒 3 秒数据（3000ms）再恢复渲染，杜绝毫秒级反复断水
+        mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "next-high-water-mark-ms", 3000);
 
         // 5. 基础网络与字幕参数
         mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "subtitle", 1);
@@ -116,12 +119,13 @@ public class IjkMediaPlayer extends IjkPlayer {
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "flush_packets", 1);
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_CODEC, "threads", "1");
         } else {
-            // 点播高码率专属网络参数
+            // 点播高码率专属网络参数：将蓄水池上限从 15 秒大幅拉大至 30 秒
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "analyzeduration", 1000000);
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "probesize", 1024 * 1024);
-            mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "max_cached_duration", 15000);
+            // 扩充至 30 秒 (配合 64MB 缓冲)，让本地代理始终能匀速多线程蓄水，避免代理被网盘掐断
+            mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_PLAYER, "max_cached_duration", 30000);
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "infbuf", 0);
-            mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "timeout", 10000000);
+            mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_FORMAT, "timeout", 15000000); // 放宽至 15 秒超时
             mMediaPlayer.setOption(tv.danmaku.ijk.media.player.IjkMediaPlayer.OPT_CATEGORY_CODEC, "threads", "2");
         }
 
